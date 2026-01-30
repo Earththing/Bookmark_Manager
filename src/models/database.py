@@ -1,0 +1,225 @@
+"""SQLite database connection and setup."""
+
+import sqlite3
+from pathlib import Path
+from typing import Optional
+import os
+
+
+class Database:
+    """Manages SQLite database connection and schema."""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        """Initialize database connection.
+
+        Args:
+            db_path: Path to the database file. If None, uses default location
+                     in user's home directory.
+        """
+        if db_path is None:
+            # Default to user's home directory
+            app_data = Path.home() / ".bookmark_manager"
+            app_data.mkdir(exist_ok=True)
+            db_path = app_data / "bookmarks.db"
+
+        self.db_path = Path(db_path)
+        self.connection: Optional[sqlite3.Connection] = None
+
+    def connect(self) -> sqlite3.Connection:
+        """Establish database connection."""
+        if self.connection is None:
+            self.connection = sqlite3.connect(str(self.db_path))
+            self.connection.row_factory = sqlite3.Row
+            # Enable foreign keys
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        return self.connection
+
+    def close(self):
+        """Close database connection."""
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+
+    def initialize_schema(self):
+        """Create database tables if they don't exist."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        # Browser profiles table - tracks each browser profile we sync with
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS browser_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                browser_name TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                profile_name TEXT,
+                profile_path TEXT NOT NULL,
+                last_synced_at TIMESTAMP,
+                sync_enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(browser_name, profile_id)
+            )
+        """)
+
+        # Folders table - hierarchical folder structure
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                parent_id INTEGER,
+                browser_profile_id INTEGER,
+                browser_folder_id TEXT,
+                browser_folder_path TEXT,
+                position INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE,
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE SET NULL
+            )
+        """)
+
+        # Bookmarks table - the main bookmark entries
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                title TEXT,
+                description TEXT,
+                notes TEXT,
+                favicon_url TEXT,
+                folder_id INTEGER,
+                browser_profile_id INTEGER,
+                browser_bookmark_id TEXT,
+                browser_added_at TIMESTAMP,
+                position INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL,
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE SET NULL
+            )
+        """)
+
+        # Tags table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Bookmark-tags junction table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bookmark_tags (
+                bookmark_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (bookmark_id, tag_id),
+                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Sync metadata table - tracks sync operations
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sync_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                browser_profile_id INTEGER NOT NULL,
+                sync_type TEXT NOT NULL,
+                bookmarks_added INTEGER DEFAULT 0,
+                bookmarks_updated INTEGER DEFAULT 0,
+                bookmarks_deleted INTEGER DEFAULT 0,
+                folders_added INTEGER DEFAULT 0,
+                folders_updated INTEGER DEFAULT 0,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Create indexes for common queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_url ON bookmarks(url)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_folder ON bookmarks(folder_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_profile ON bookmarks(browser_profile_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_folders_profile ON folders(browser_profile_id)")
+
+        # Full-text search virtual table for bookmarks
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+                title,
+                url,
+                description,
+                notes,
+                content=bookmarks,
+                content_rowid=id
+            )
+        """)
+
+        # Triggers to keep FTS in sync
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+                INSERT INTO bookmarks_fts(rowid, title, url, description, notes)
+                VALUES (new.id, new.title, new.url, new.description, new.notes);
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+                INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, url, description, notes)
+                VALUES ('delete', old.id, old.title, old.url, old.description, old.notes);
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+                INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, url, description, notes)
+                VALUES ('delete', old.id, old.title, old.url, old.description, old.notes);
+                INSERT INTO bookmarks_fts(rowid, title, url, description, notes)
+                VALUES (new.id, new.title, new.url, new.description, new.notes);
+            END
+        """)
+
+        conn.commit()
+
+    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Execute a SQL query."""
+        conn = self.connect()
+        return conn.execute(query, params)
+
+    def executemany(self, query: str, params_list: list) -> sqlite3.Cursor:
+        """Execute a SQL query with multiple parameter sets."""
+        conn = self.connect()
+        return conn.executemany(query, params_list)
+
+    def commit(self):
+        """Commit current transaction."""
+        if self.connection:
+            self.connection.commit()
+
+    def rollback(self):
+        """Rollback current transaction."""
+        if self.connection:
+            self.connection.rollback()
+
+
+# Global database instance
+_database: Optional[Database] = None
+
+
+def get_database(db_path: Optional[Path] = None) -> Database:
+    """Get or create the global database instance."""
+    global _database
+    if _database is None:
+        _database = Database(db_path)
+        _database.initialize_schema()
+    return _database
+
+
+def reset_database():
+    """Reset the global database instance (mainly for testing)."""
+    global _database
+    if _database:
+        _database.close()
+    _database = None
