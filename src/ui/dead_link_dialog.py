@@ -457,16 +457,14 @@ class DeadLinkDialog(QDialog):
             self.current_label.setText(
                 f"Check complete! Found {count} dead link(s). Run ID: {check_run_id}\n"
                 f"Checked {unique_checked} unique URLs ({duplicates_saved} duplicate checks skipped).\n"
-                f"Results saved to database (view: vw_dead_links)."
+                f"Results saved to database."
             )
             QMessageBox.warning(
                 self, "Check Complete",
                 f"Found {count} dead link(s) in your bookmarks.\n\n"
                 f"Checked {unique_checked} unique URLs.\n"
                 f"Skipped {duplicates_saved} duplicate URL checks.\n\n"
-                f"Results saved to database.\n"
-                f"Run ID: {check_run_id}\n"
-                f"Query with: SELECT * FROM vw_dead_links WHERE check_run_id = '{check_run_id}'"
+                f"Results saved to database (Run ID: {check_run_id})."
             )
 
     def on_error(self, error_message: str):

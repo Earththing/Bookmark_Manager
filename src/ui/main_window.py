@@ -17,9 +17,10 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QMenu,
     QApplication,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices
+from PyQt6.QtGui import QAction, QDesktopServices, QColor
 
 from ..models.database import get_database
 from ..models.bookmark import Bookmark
@@ -27,7 +28,8 @@ from ..models.folder import Folder
 from ..models.browser_profile import BrowserProfile
 from .import_dialog import ImportDialog
 from .dead_link_dialog import DeadLinkDialog
-from .duplicate_dialog import DuplicateDialog
+from .duplicate_dialog import DuplicateDialog, normalize_url
+from .refresh_all_dialog import RefreshAllDialog
 
 
 class MainWindow(QMainWindow):
@@ -40,13 +42,19 @@ class MainWindow(QMainWindow):
         self.current_profile_id = None
         self.all_bookmarks_mode = True
 
+        # Caches for dead links and duplicates
+        self.dead_link_bookmark_ids = set()
+        self.exact_duplicate_counts = {}
+        self.similar_duplicate_counts = {}
+
         self.setup_ui()
+        self.load_status_data()
         self.load_data()
 
     def setup_ui(self):
         """Set up the user interface."""
         self.setWindowTitle("Bookmark Manager")
-        self.setMinimumSize(1000, 600)
+        self.setMinimumSize(1200, 600)
 
         # Create central widget and main layout
         central_widget = QWidget()
@@ -54,15 +62,23 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Search bar at the top
-        search_layout = QHBoxLayout()
+        # Top bar with search and Refresh All button
+        top_layout = QHBoxLayout()
+
         search_label = QLabel("Search:")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search bookmarks by title, URL, or notes...")
         self.search_input.textChanged.connect(self.on_search_changed)
-        search_layout.addWidget(search_label)
-        search_layout.addWidget(self.search_input)
-        main_layout.addLayout(search_layout)
+        top_layout.addWidget(search_label)
+        top_layout.addWidget(self.search_input)
+
+        top_layout.addSpacing(20)
+
+        self.refresh_all_button = QPushButton("Refresh All...")
+        self.refresh_all_button.clicked.connect(self.show_refresh_all_dialog)
+        top_layout.addWidget(self.refresh_all_button)
+
+        main_layout.addLayout(top_layout)
 
         # Create splitter for sidebar and main content
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -76,15 +92,24 @@ class MainWindow(QMainWindow):
 
         # Right side - bookmark table
         self.bookmark_table = QTableWidget()
-        self.bookmark_table.setColumnCount(4)
-        self.bookmark_table.setHorizontalHeaderLabels(["Title", "URL", "Folder", "Browser/Profile"])
-        self.bookmark_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.bookmark_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.bookmark_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.bookmark_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.bookmark_table.setColumnWidth(0, 250)
-        self.bookmark_table.setColumnWidth(2, 150)
-        self.bookmark_table.setColumnWidth(3, 150)
+        self.bookmark_table.setColumnCount(7)
+        self.bookmark_table.setHorizontalHeaderLabels([
+            "Title", "URL", "Folder", "Browser/Profile", "Dead", "Exact Dup", "Similar"
+        ])
+
+        # All columns interactive (resizable)
+        for i in range(7):
+            self.bookmark_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+
+        # Set initial column widths
+        self.bookmark_table.setColumnWidth(0, 250)  # Title
+        self.bookmark_table.setColumnWidth(1, 350)  # URL
+        self.bookmark_table.setColumnWidth(2, 120)  # Folder
+        self.bookmark_table.setColumnWidth(3, 150)  # Browser/Profile
+        self.bookmark_table.setColumnWidth(4, 50)   # Dead
+        self.bookmark_table.setColumnWidth(5, 70)   # Exact Dup
+        self.bookmark_table.setColumnWidth(6, 60)   # Similar
+
         self.bookmark_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.bookmark_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.bookmark_table.doubleClicked.connect(self.on_bookmark_double_clicked)
@@ -92,8 +117,8 @@ class MainWindow(QMainWindow):
         self.bookmark_table.customContextMenuRequested.connect(self.show_bookmark_context_menu)
         splitter.addWidget(self.bookmark_table)
 
-        # Set splitter sizes (30% sidebar, 70% content)
-        splitter.setSizes([300, 700])
+        # Set splitter sizes (25% sidebar, 75% content)
+        splitter.setSizes([250, 950])
         main_layout.addWidget(splitter)
 
         # Status bar
@@ -109,6 +134,13 @@ class MainWindow(QMainWindow):
 
         # File menu
         file_menu = menu_bar.addMenu("&File")
+
+        refresh_all_action = QAction("Refresh &All...", self)
+        refresh_all_action.setShortcut("Ctrl+Shift+R")
+        refresh_all_action.triggered.connect(self.show_refresh_all_dialog)
+        file_menu.addAction(refresh_all_action)
+
+        file_menu.addSeparator()
 
         import_action = QAction("&Import from Browsers...", self)
         import_action.setShortcut("Ctrl+I")
@@ -129,9 +161,9 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        refresh_action = QAction("&Refresh", self)
+        refresh_action = QAction("&Refresh View", self)
         refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self.load_data)
+        refresh_action.triggered.connect(self.refresh_view)
         file_menu.addAction(refresh_action)
 
         file_menu.addSeparator()
@@ -155,6 +187,70 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+    def load_status_data(self):
+        """Load dead link and duplicate status data from database."""
+        # Load dead link bookmark IDs (from most recent check)
+        self.dead_link_bookmark_ids = set()
+        try:
+            cursor = self.db.execute("""
+                SELECT DISTINCT bookmark_id FROM dead_links
+                WHERE check_run_id = (
+                    SELECT check_run_id FROM dead_links
+                    ORDER BY checked_at DESC LIMIT 1
+                )
+            """)
+            for row in cursor.fetchall():
+                self.dead_link_bookmark_ids.add(row['bookmark_id'])
+        except Exception:
+            pass
+
+        # Load exact duplicate counts (from most recent check)
+        self.exact_duplicate_counts = {}
+        try:
+            cursor = self.db.execute("""
+                SELECT dgm.bookmark_id,
+                       (SELECT COUNT(*) FROM duplicate_group_members dgm2
+                        WHERE dgm2.duplicate_group_id = dgm.duplicate_group_id) as group_size
+                FROM duplicate_group_members dgm
+                JOIN duplicate_groups dg ON dgm.duplicate_group_id = dg.duplicate_group_id
+                WHERE dg.match_type = 'exact'
+                AND dg.check_run_id = (
+                    SELECT check_run_id FROM duplicate_groups
+                    WHERE match_type = 'exact'
+                    ORDER BY created_at DESC LIMIT 1
+                )
+            """)
+            for row in cursor.fetchall():
+                self.exact_duplicate_counts[row['bookmark_id']] = row['group_size']
+        except Exception:
+            pass
+
+        # Load similar duplicate counts (from most recent check)
+        self.similar_duplicate_counts = {}
+        try:
+            cursor = self.db.execute("""
+                SELECT dgm.bookmark_id,
+                       (SELECT COUNT(*) FROM duplicate_group_members dgm2
+                        WHERE dgm2.duplicate_group_id = dgm.duplicate_group_id) as group_size
+                FROM duplicate_group_members dgm
+                JOIN duplicate_groups dg ON dgm.duplicate_group_id = dg.duplicate_group_id
+                WHERE dg.match_type = 'similar'
+                AND dg.check_run_id = (
+                    SELECT check_run_id FROM duplicate_groups
+                    WHERE match_type = 'similar'
+                    ORDER BY created_at DESC LIMIT 1
+                )
+            """)
+            for row in cursor.fetchall():
+                self.similar_duplicate_counts[row['bookmark_id']] = row['group_size']
+        except Exception:
+            pass
+
+    def refresh_view(self):
+        """Refresh the view with latest data."""
+        self.load_status_data()
+        self.load_data()
 
     def load_data(self):
         """Load all data from database."""
@@ -277,6 +373,31 @@ class MainWindow(QMainWindow):
             profile_item = QTableWidgetItem(profile_str)
             self.bookmark_table.setItem(row, 3, profile_item)
 
+            # Dead link flag
+            dead_item = QTableWidgetItem()
+            if bookmark.bookmark_id in self.dead_link_bookmark_ids:
+                dead_item.setText("X")
+                dead_item.setForeground(QColor(255, 0, 0))  # Red
+            self.bookmark_table.setItem(row, 4, dead_item)
+
+            # Exact duplicate count
+            exact_dup_item = QTableWidgetItem()
+            if bookmark.bookmark_id in self.exact_duplicate_counts:
+                count = self.exact_duplicate_counts[bookmark.bookmark_id]
+                if count > 1:
+                    exact_dup_item.setText(str(count))
+                    exact_dup_item.setForeground(QColor(255, 140, 0))  # Orange
+            self.bookmark_table.setItem(row, 5, exact_dup_item)
+
+            # Similar duplicate count
+            similar_dup_item = QTableWidgetItem()
+            if bookmark.bookmark_id in self.similar_duplicate_counts:
+                count = self.similar_duplicate_counts[bookmark.bookmark_id]
+                if count > 1:
+                    similar_dup_item.setText(str(count))
+                    similar_dup_item.setForeground(QColor(0, 100, 200))  # Blue
+            self.bookmark_table.setItem(row, 6, similar_dup_item)
+
         self.update_status_bar()
 
     def on_folder_clicked(self, item, column):
@@ -372,11 +493,20 @@ class MainWindow(QMainWindow):
         """Update the status bar with current stats."""
         total = Bookmark.count(self.db)
         shown = self.bookmark_table.rowCount()
+        dead_count = len(self.dead_link_bookmark_ids)
+        dup_count = len([c for c in self.exact_duplicate_counts.values() if c > 1])
 
         if shown == total:
-            self.status_bar.showMessage(f"Showing all {total} bookmarks")
+            msg = f"Showing all {total} bookmarks"
         else:
-            self.status_bar.showMessage(f"Showing {shown} of {total} bookmarks")
+            msg = f"Showing {shown} of {total} bookmarks"
+
+        if dead_count > 0:
+            msg += f" | {dead_count} dead links"
+        if dup_count > 0:
+            msg += f" | {dup_count} with duplicates"
+
+        self.status_bar.showMessage(msg)
 
     def show_import_dialog(self):
         """Show the import dialog."""
@@ -389,11 +519,25 @@ class MainWindow(QMainWindow):
         """Show the dead link checker dialog."""
         dialog = DeadLinkDialog(self)
         dialog.exec()
+        # Refresh status data after check
+        self.load_status_data()
+        self.load_bookmarks()
 
     def show_duplicate_dialog(self):
         """Show the duplicate finder dialog."""
         dialog = DuplicateDialog(self)
         dialog.exec()
+        # Refresh status data after check
+        self.load_status_data()
+        self.load_bookmarks()
+
+    def show_refresh_all_dialog(self):
+        """Show the refresh all dialog."""
+        dialog = RefreshAllDialog(self)
+        dialog.exec()
+        # Refresh everything after
+        self.load_status_data()
+        self.load_data()
 
     def show_about(self):
         """Show about dialog."""
@@ -407,5 +551,7 @@ class MainWindow(QMainWindow):
             "- Import bookmarks from multiple browser profiles\n"
             "- Full-text search\n"
             "- Folder navigation\n"
+            "- Dead link detection\n"
+            "- Duplicate detection\n"
             "- Open bookmarks in your default browser"
         )

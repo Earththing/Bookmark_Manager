@@ -461,12 +461,7 @@ class DuplicateDialog(QDialog):
                 self, "Search Complete",
                 f"Found {exact_count} exact duplicates in {len(self.exact_groups)} groups.\n"
                 f"Found {similar_count} similar URLs in {len(self.similar_groups)} groups.\n\n"
-                f"Results saved to database.\n"
-                f"Run ID: {check_run_id}\n\n"
-                f"Query exact duplicates:\n"
-                f"SELECT * FROM vw_duplicates_exact WHERE check_run_id = '{check_run_id}'\n\n"
-                f"Query similar URLs:\n"
-                f"SELECT * FROM vw_duplicates_similar WHERE check_run_id = '{check_run_id}'"
+                f"Results saved to database (Run ID: {check_run_id})."
             )
 
     def on_error(self, error_message: str):
