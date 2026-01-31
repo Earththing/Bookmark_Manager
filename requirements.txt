@@ -1,8 +1,10 @@
 # Core dependencies
 # SQLite is built into Python, no external dependency needed
 
+# GUI framework
+PyQt6>=6.5.0
+
 # Future dependencies (not yet used)
-# PyQt6>=6.5.0           # GUI framework (for Phase 2)
 # SQLAlchemy>=2.0.0      # ORM (optional, using raw SQLite for now)
 # pydantic>=2.0.0        # Data validation
 # platformdirs>=3.0.0    # Cross-platform paths
