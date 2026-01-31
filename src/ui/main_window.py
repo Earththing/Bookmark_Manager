@@ -149,15 +149,15 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        dead_link_action = QAction("Check &Dead Links...", self)
-        dead_link_action.setShortcut("Ctrl+D")
-        dead_link_action.triggered.connect(self.show_dead_link_dialog)
-        file_menu.addAction(dead_link_action)
-
         duplicate_action = QAction("Find D&uplicates...", self)
         duplicate_action.setShortcut("Ctrl+U")
         duplicate_action.triggered.connect(self.show_duplicate_dialog)
         file_menu.addAction(duplicate_action)
+
+        dead_link_action = QAction("Check &Dead Links...", self)
+        dead_link_action.setShortcut("Ctrl+D")
+        dead_link_action.triggered.connect(self.show_dead_link_dialog)
+        file_menu.addAction(dead_link_action)
 
         file_menu.addSeparator()
 
