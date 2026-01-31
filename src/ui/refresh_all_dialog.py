@@ -1,5 +1,6 @@
 """Refresh All Dialog - Runs backup, import, duplicate check, and dead link check."""
 
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
-from ..models.database import Database, get_database
+from ..models.database import Database, get_database, reset_database
 from ..models.bookmark import Bookmark
 from ..services.profile_detector import ProfileDetector
 from ..services.import_service import ImportService
@@ -29,13 +30,14 @@ class RefreshAllWorker(QThread):
     error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path: str, do_backup: bool, do_import: bool,
-                 do_duplicates: bool, do_dead_links: bool):
+                 do_duplicates: bool, do_dead_links: bool, start_fresh: bool):
         super().__init__()
         self.db_path = db_path
         self.do_backup = do_backup
         self.do_import = do_import
         self.do_duplicates = do_duplicates
         self.do_dead_links = do_dead_links
+        self.start_fresh = start_fresh
         self._cancelled = False
 
     def cancel(self):
@@ -52,12 +54,17 @@ class RefreshAllWorker(QThread):
         }
 
         try:
-            # Phase 1: Backup
+            # Phase 1: Backup and optionally create fresh database
             if self.do_backup and not self._cancelled:
                 self.status_updated.emit("Creating database backup...")
                 backup_path = self.create_backup()
                 results['backup'] = backup_path
                 self.phase_completed.emit("Backup", f"Created: {backup_path}")
+
+                if self.start_fresh:
+                    self.status_updated.emit("Creating fresh database...")
+                    self.create_fresh_database()
+                    self.phase_completed.emit("Fresh DB", "New database created")
 
             # Phase 2: Import
             if self.do_import and not self._cancelled:
@@ -94,6 +101,19 @@ class RefreshAllWorker(QThread):
 
         shutil.copy2(db_path, backup_path)
         return str(backup_path)
+
+    def create_fresh_database(self):
+        """Delete the current database and create a fresh one."""
+        db_path = Path(self.db_path)
+
+        # Remove the existing database file
+        if db_path.exists():
+            os.remove(db_path)
+
+        # Create a new database with fresh schema
+        db = Database(self.db_path)
+        db.initialize_schema()
+        db.close()
 
     def run_import(self) -> str:
         """Import bookmarks from all detected browser profiles."""
@@ -250,13 +270,16 @@ class RefreshAllWorker(QThread):
 class RefreshAllDialog(QDialog):
     """Dialog for running all refresh operations."""
 
+    # Signal to notify parent that database was reset
+    database_reset = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.db = get_database()
         self.worker = None
 
         self.setWindowTitle("Refresh All")
-        self.setMinimumSize(500, 450)
+        self.setMinimumSize(550, 500)
         self.setup_ui()
 
     def setup_ui(self):
@@ -278,6 +301,18 @@ class RefreshAllDialog(QDialog):
         self.backup_check = QCheckBox("1. Backup database (with timestamp)")
         self.backup_check.setChecked(True)
         options_layout.addWidget(self.backup_check)
+
+        # Sub-option for starting fresh
+        self.fresh_db_check = QCheckBox("    Start with fresh database after backup")
+        self.fresh_db_check.setChecked(True)
+        self.fresh_db_check.setToolTip(
+            "Delete the current database after backup and start fresh.\n"
+            "This ensures a clean import without old/stale data."
+        )
+        options_layout.addWidget(self.fresh_db_check)
+
+        # Connect backup checkbox to enable/disable fresh db option
+        self.backup_check.stateChanged.connect(self.on_backup_changed)
 
         self.import_check = QCheckBox("2. Import bookmarks from browsers")
         self.import_check.setChecked(True)
@@ -339,6 +374,12 @@ class RefreshAllDialog(QDialog):
 
         layout.addLayout(button_layout)
 
+    def on_backup_changed(self, state):
+        """Handle backup checkbox state change."""
+        self.fresh_db_check.setEnabled(state == Qt.CheckState.Checked.value)
+        if state != Qt.CheckState.Checked.value:
+            self.fresh_db_check.setChecked(False)
+
     def start_refresh(self):
         """Start the refresh operations."""
         # Check at least one option is selected
@@ -352,9 +393,23 @@ class RefreshAllDialog(QDialog):
                               "Please select at least one operation to perform.")
             return
 
+        # Warn if starting fresh without import
+        if self.fresh_db_check.isChecked() and not self.import_check.isChecked():
+            reply = QMessageBox.warning(
+                self, "Warning",
+                "You selected 'Start with fresh database' but did not select 'Import bookmarks'.\n\n"
+                "This will result in an empty database!\n\n"
+                "Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.backup_check.setEnabled(False)
+        self.fresh_db_check.setEnabled(False)
         self.import_check.setEnabled(False)
         self.duplicates_check.setEnabled(False)
         self.dead_links_check.setEnabled(False)
@@ -363,12 +418,16 @@ class RefreshAllDialog(QDialog):
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting...")
 
+        # Reset the global database instance so worker creates fresh connection
+        reset_database()
+
         self.worker = RefreshAllWorker(
-            self.db.db_path,
+            str(self.db.db_path),  # Pass path, not the closed connection
             self.backup_check.isChecked(),
             self.import_check.isChecked(),
             self.duplicates_check.isChecked(),
-            self.dead_links_check.isChecked()
+            self.dead_links_check.isChecked(),
+            self.fresh_db_check.isChecked() and self.backup_check.isChecked()
         )
         self.worker.status_updated.connect(self.on_status_updated)
         self.worker.progress_updated.connect(self.on_progress_updated)
@@ -403,6 +462,7 @@ class RefreshAllDialog(QDialog):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.backup_check.setEnabled(True)
+        self.fresh_db_check.setEnabled(self.backup_check.isChecked())
         self.import_check.setEnabled(True)
         self.duplicates_check.setEnabled(True)
         self.dead_links_check.setEnabled(True)
@@ -411,6 +471,9 @@ class RefreshAllDialog(QDialog):
         self.status_label.setText("All operations completed!")
 
         self.log_text.append("\n--- All operations completed ---")
+
+        # Emit signal so parent can reset its database connection
+        self.database_reset.emit()
 
         QMessageBox.information(self, "Refresh Complete",
                               "All selected operations have been completed.\n\n"
@@ -421,6 +484,7 @@ class RefreshAllDialog(QDialog):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.backup_check.setEnabled(True)
+        self.fresh_db_check.setEnabled(self.backup_check.isChecked())
         self.import_check.setEnabled(True)
         self.duplicates_check.setEnabled(True)
         self.dead_links_check.setEnabled(True)

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices, QColor
 
-from ..models.database import get_database
+from ..models.database import get_database, reset_database
 from ..models.bookmark import Bookmark
 from ..models.folder import Folder
 from ..models.browser_profile import BrowserProfile
@@ -534,10 +534,17 @@ class MainWindow(QMainWindow):
     def show_refresh_all_dialog(self):
         """Show the refresh all dialog."""
         dialog = RefreshAllDialog(self)
+        dialog.database_reset.connect(self.on_database_reset)
         dialog.exec()
         # Refresh everything after
         self.load_status_data()
         self.load_data()
+
+    def on_database_reset(self):
+        """Handle database reset - get new connection."""
+        # Reset and get fresh database connection
+        reset_database()
+        self.db = get_database()
 
     def show_about(self):
         """Show about dialog."""
