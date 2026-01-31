@@ -10,7 +10,7 @@ import sqlite3
 class Bookmark:
     """Represents a bookmark entry."""
 
-    id: Optional[int] = None
+    bookmark_id: Optional[int] = None
     url: str = ""
     title: Optional[str] = None
     description: Optional[str] = None
@@ -28,7 +28,7 @@ class Bookmark:
     def from_row(cls, row: sqlite3.Row) -> "Bookmark":
         """Create a Bookmark from a database row."""
         return cls(
-            id=row["id"],
+            bookmark_id=row["bookmark_id"],
             url=row["url"],
             title=row["title"],
             description=row["description"],
@@ -55,7 +55,7 @@ class Bookmark:
             self.browser_added_at.isoformat() if self.browser_added_at else None
         )
 
-        if self.id is None:
+        if self.bookmark_id is None:
             cursor = db.execute(
                 """
                 INSERT INTO bookmarks
@@ -77,7 +77,7 @@ class Bookmark:
                 ),
             )
             db.commit()
-            self.id = cursor.lastrowid
+            self.bookmark_id = cursor.lastrowid
         else:
             db.execute(
                 """
@@ -86,7 +86,7 @@ class Bookmark:
                     favicon_url = ?, folder_id = ?, browser_profile_id = ?,
                     browser_bookmark_id = ?, browser_added_at = ?,
                     position = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE bookmark_id = ?
                 """,
                 (
                     self.url,
@@ -99,7 +99,7 @@ class Bookmark:
                     self.browser_bookmark_id,
                     browser_added_str,
                     self.position,
-                    self.id,
+                    self.bookmark_id,
                 ),
             )
             db.commit()
@@ -108,7 +108,7 @@ class Bookmark:
     @classmethod
     def find_by_id(cls, db, bookmark_id: int) -> Optional["Bookmark"]:
         """Find a bookmark by its database ID."""
-        cursor = db.execute("SELECT * FROM bookmarks WHERE id = ?", (bookmark_id,))
+        cursor = db.execute("SELECT * FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,))
         row = cursor.fetchone()
         return cls.from_row(row) if row else None
 
@@ -178,7 +178,7 @@ class Bookmark:
         cursor = db.execute(
             """
             SELECT b.* FROM bookmarks b
-            JOIN bookmarks_fts fts ON b.id = fts.rowid
+            JOIN bookmarks_fts fts ON b.bookmark_id = fts.rowid
             WHERE bookmarks_fts MATCH ?
             ORDER BY rank
             """,
@@ -205,10 +205,10 @@ class Bookmark:
 
     def delete(self, db):
         """Delete this bookmark from the database."""
-        if self.id:
-            db.execute("DELETE FROM bookmarks WHERE id = ?", (self.id,))
+        if self.bookmark_id:
+            db.execute("DELETE FROM bookmarks WHERE bookmark_id = ?", (self.bookmark_id,))
             db.commit()
-            self.id = None
+            self.bookmark_id = None
 
     @classmethod
     def delete_by_profile(cls, db, browser_profile_id: int):

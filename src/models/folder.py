@@ -10,9 +10,9 @@ import sqlite3
 class Folder:
     """Represents a folder/collection for organizing bookmarks."""
 
-    id: Optional[int] = None
+    folder_id: Optional[int] = None
     name: str = ""
-    parent_id: Optional[int] = None
+    parent_folder_id: Optional[int] = None
     browser_profile_id: Optional[int] = None
     browser_folder_id: Optional[str] = None  # Original ID from browser
     browser_folder_path: Optional[str] = None  # Path like "Bookmarks Bar/Work"
@@ -24,9 +24,9 @@ class Folder:
     def from_row(cls, row: sqlite3.Row) -> "Folder":
         """Create a Folder from a database row."""
         return cls(
-            id=row["id"],
+            folder_id=row["folder_id"],
             name=row["name"],
-            parent_id=row["parent_id"],
+            parent_folder_id=row["parent_folder_id"],
             browser_profile_id=row["browser_profile_id"],
             browser_folder_id=row["browser_folder_id"],
             browser_folder_path=row["browser_folder_path"],
@@ -41,17 +41,17 @@ class Folder:
 
     def save(self, db) -> "Folder":
         """Save the folder to the database."""
-        if self.id is None:
+        if self.folder_id is None:
             cursor = db.execute(
                 """
                 INSERT INTO folders
-                (name, parent_id, browser_profile_id, browser_folder_id,
+                (name, parent_folder_id, browser_profile_id, browser_folder_id,
                  browser_folder_path, position)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.name,
-                    self.parent_id,
+                    self.parent_folder_id,
                     self.browser_profile_id,
                     self.browser_folder_id,
                     self.browser_folder_path,
@@ -59,24 +59,24 @@ class Folder:
                 ),
             )
             db.commit()
-            self.id = cursor.lastrowid
+            self.folder_id = cursor.lastrowid
         else:
             db.execute(
                 """
                 UPDATE folders
-                SET name = ?, parent_id = ?, browser_profile_id = ?,
+                SET name = ?, parent_folder_id = ?, browser_profile_id = ?,
                     browser_folder_id = ?, browser_folder_path = ?,
                     position = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE folder_id = ?
                 """,
                 (
                     self.name,
-                    self.parent_id,
+                    self.parent_folder_id,
                     self.browser_profile_id,
                     self.browser_folder_id,
                     self.browser_folder_path,
                     self.position,
-                    self.id,
+                    self.folder_id,
                 ),
             )
             db.commit()
@@ -85,7 +85,7 @@ class Folder:
     @classmethod
     def find_by_id(cls, db, folder_id: int) -> Optional["Folder"]:
         """Find a folder by its database ID."""
-        cursor = db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,))
+        cursor = db.execute("SELECT * FROM folders WHERE folder_id = ?", (folder_id,))
         row = cursor.fetchone()
         return cls.from_row(row) if row else None
 
@@ -108,16 +108,16 @@ class Folder:
     def get_root_folders(cls, db) -> List["Folder"]:
         """Get all root-level folders (no parent)."""
         cursor = db.execute(
-            "SELECT * FROM folders WHERE parent_id IS NULL ORDER BY position, name"
+            "SELECT * FROM folders WHERE parent_folder_id IS NULL ORDER BY position, name"
         )
         return [cls.from_row(row) for row in cursor.fetchall()]
 
     @classmethod
-    def get_children(cls, db, parent_id: int) -> List["Folder"]:
+    def get_children(cls, db, parent_folder_id: int) -> List["Folder"]:
         """Get all child folders of a parent folder."""
         cursor = db.execute(
-            "SELECT * FROM folders WHERE parent_id = ? ORDER BY position, name",
-            (parent_id,),
+            "SELECT * FROM folders WHERE parent_folder_id = ? ORDER BY position, name",
+            (parent_folder_id,),
         )
         return [cls.from_row(row) for row in cursor.fetchall()]
 
@@ -139,8 +139,8 @@ class Folder:
         path_parts = [self.name]
         current = self
 
-        while current.parent_id is not None:
-            parent = Folder.find_by_id(db, current.parent_id)
+        while current.parent_folder_id is not None:
+            parent = Folder.find_by_id(db, current.parent_folder_id)
             if parent:
                 path_parts.insert(0, parent.name)
                 current = parent
@@ -151,10 +151,10 @@ class Folder:
 
     def delete(self, db):
         """Delete this folder from the database (cascades to children)."""
-        if self.id:
-            db.execute("DELETE FROM folders WHERE id = ?", (self.id,))
+        if self.folder_id:
+            db.execute("DELETE FROM folders WHERE folder_id = ?", (self.folder_id,))
             db.commit()
-            self.id = None
+            self.folder_id = None
 
     @classmethod
     def delete_by_profile(cls, db, browser_profile_id: int):

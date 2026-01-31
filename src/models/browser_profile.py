@@ -11,10 +11,10 @@ import sqlite3
 class BrowserProfile:
     """Represents a browser profile that can be synced."""
 
-    id: Optional[int] = None
+    browser_profile_id: Optional[int] = None
     browser_name: str = ""  # e.g., "Chrome", "Edge"
-    profile_id: str = ""  # e.g., "Default", "Profile 1"
-    profile_name: Optional[str] = None  # User-friendly name from preferences
+    browser_profile_name: str = ""  # e.g., "Default", "Profile 1"
+    profile_display_name: Optional[str] = None  # User-friendly name from preferences
     profile_path: str = ""  # Full path to profile directory
     last_synced_at: Optional[datetime] = None
     sync_enabled: bool = True
@@ -25,10 +25,10 @@ class BrowserProfile:
     def from_row(cls, row: sqlite3.Row) -> "BrowserProfile":
         """Create a BrowserProfile from a database row."""
         return cls(
-            id=row["id"],
+            browser_profile_id=row["browser_profile_id"],
             browser_name=row["browser_name"],
-            profile_id=row["profile_id"],
-            profile_name=row["profile_name"],
+            browser_profile_name=row["browser_profile_name"],
+            profile_display_name=row["profile_display_name"],
             profile_path=row["profile_path"],
             last_synced_at=datetime.fromisoformat(row["last_synced_at"])
             if row["last_synced_at"]
@@ -44,38 +44,38 @@ class BrowserProfile:
 
     def save(self, db) -> "BrowserProfile":
         """Save the profile to the database."""
-        if self.id is None:
+        if self.browser_profile_id is None:
             cursor = db.execute(
                 """
                 INSERT INTO browser_profiles
-                (browser_name, profile_id, profile_name, profile_path, sync_enabled)
+                (browser_name, browser_profile_name, profile_display_name, profile_path, sync_enabled)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     self.browser_name,
-                    self.profile_id,
-                    self.profile_name,
+                    self.browser_profile_name,
+                    self.profile_display_name,
                     self.profile_path,
                     1 if self.sync_enabled else 0,
                 ),
             )
             db.commit()
-            self.id = cursor.lastrowid
+            self.browser_profile_id = cursor.lastrowid
         else:
             db.execute(
                 """
                 UPDATE browser_profiles
-                SET browser_name = ?, profile_id = ?, profile_name = ?,
+                SET browser_name = ?, browser_profile_name = ?, profile_display_name = ?,
                     profile_path = ?, sync_enabled = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE browser_profile_id = ?
                 """,
                 (
                     self.browser_name,
-                    self.profile_id,
-                    self.profile_name,
+                    self.browser_profile_name,
+                    self.profile_display_name,
                     self.profile_path,
                     1 if self.sync_enabled else 0,
-                    self.id,
+                    self.browser_profile_id,
                 ),
             )
             db.commit()
@@ -83,35 +83,35 @@ class BrowserProfile:
 
     def update_last_synced(self, db):
         """Update the last_synced_at timestamp."""
-        if self.id:
+        if self.browser_profile_id:
             db.execute(
                 """
                 UPDATE browser_profiles
                 SET last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE browser_profile_id = ?
                 """,
-                (self.id,),
+                (self.browser_profile_id,),
             )
             db.commit()
             self.last_synced_at = datetime.now()
 
     @classmethod
-    def find_by_id(cls, db, profile_id: int) -> Optional["BrowserProfile"]:
+    def find_by_id(cls, db, browser_profile_id: int) -> Optional["BrowserProfile"]:
         """Find a profile by its database ID."""
         cursor = db.execute(
-            "SELECT * FROM browser_profiles WHERE id = ?", (profile_id,)
+            "SELECT * FROM browser_profiles WHERE browser_profile_id = ?", (browser_profile_id,)
         )
         row = cursor.fetchone()
         return cls.from_row(row) if row else None
 
     @classmethod
     def find_by_browser_and_profile(
-        cls, db, browser_name: str, profile_id: str
+        cls, db, browser_name: str, browser_profile_name: str
     ) -> Optional["BrowserProfile"]:
-        """Find a profile by browser name and profile ID."""
+        """Find a profile by browser name and profile name."""
         cursor = db.execute(
-            "SELECT * FROM browser_profiles WHERE browser_name = ? AND profile_id = ?",
-            (browser_name, profile_id),
+            "SELECT * FROM browser_profiles WHERE browser_name = ? AND browser_profile_name = ?",
+            (browser_name, browser_profile_name),
         )
         row = cursor.fetchone()
         return cls.from_row(row) if row else None
@@ -119,14 +119,14 @@ class BrowserProfile:
     @classmethod
     def get_all(cls, db) -> List["BrowserProfile"]:
         """Get all browser profiles."""
-        cursor = db.execute("SELECT * FROM browser_profiles ORDER BY browser_name, profile_id")
+        cursor = db.execute("SELECT * FROM browser_profiles ORDER BY browser_name, browser_profile_name")
         return [cls.from_row(row) for row in cursor.fetchall()]
 
     @classmethod
     def get_enabled(cls, db) -> List["BrowserProfile"]:
         """Get all enabled browser profiles."""
         cursor = db.execute(
-            "SELECT * FROM browser_profiles WHERE sync_enabled = 1 ORDER BY browser_name, profile_id"
+            "SELECT * FROM browser_profiles WHERE sync_enabled = 1 ORDER BY browser_name, browser_profile_name"
         )
         return [cls.from_row(row) for row in cursor.fetchall()]
 
@@ -136,7 +136,7 @@ class BrowserProfile:
 
     def delete(self, db):
         """Delete this profile from the database."""
-        if self.id:
-            db.execute("DELETE FROM browser_profiles WHERE id = ?", (self.id,))
+        if self.browser_profile_id:
+            db.execute("DELETE FROM browser_profiles WHERE browser_profile_id = ?", (self.browser_profile_id,))
             db.commit()
-            self.id = None
+            self.browser_profile_id = None

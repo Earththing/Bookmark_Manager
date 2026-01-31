@@ -48,40 +48,40 @@ class Database:
         # Browser profiles table - tracks each browser profile we sync with
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS browser_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                browser_profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 browser_name TEXT NOT NULL,
-                profile_id TEXT NOT NULL,
-                profile_name TEXT,
+                browser_profile_name TEXT NOT NULL,
+                profile_display_name TEXT,
                 profile_path TEXT NOT NULL,
                 last_synced_at TIMESTAMP,
                 sync_enabled INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(browser_name, profile_id)
+                UNIQUE(browser_name, browser_profile_name)
             )
         """)
 
         # Folders table - hierarchical folder structure
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS folders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                parent_id INTEGER,
+                parent_folder_id INTEGER,
                 browser_profile_id INTEGER,
                 browser_folder_id TEXT,
                 browser_folder_path TEXT,
                 position INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE,
-                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE SET NULL
+                FOREIGN KEY (parent_folder_id) REFERENCES folders(folder_id) ON DELETE CASCADE,
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(browser_profile_id) ON DELETE SET NULL
             )
         """)
 
         # Bookmarks table - the main bookmark entries
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bookmarks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bookmark_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
                 title TEXT,
                 description TEXT,
@@ -94,15 +94,15 @@ class Database:
                 position INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL,
-                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE SET NULL
+                FOREIGN KEY (folder_id) REFERENCES folders(folder_id) ON DELETE SET NULL,
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(browser_profile_id) ON DELETE SET NULL
             )
         """)
 
         # Tags table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tags (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 color TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -115,15 +115,15 @@ class Database:
                 bookmark_id INTEGER NOT NULL,
                 tag_id INTEGER NOT NULL,
                 PRIMARY KEY (bookmark_id, tag_id),
-                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(id) ON DELETE CASCADE,
-                FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(bookmark_id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
             )
         """)
 
         # Sync metadata table - tracks sync operations
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sync_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_history_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 browser_profile_id INTEGER NOT NULL,
                 sync_type TEXT NOT NULL,
                 bookmarks_added INTEGER DEFAULT 0,
@@ -134,7 +134,7 @@ class Database:
                 status TEXT NOT NULL,
                 error_message TEXT,
                 synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(id) ON DELETE CASCADE
+                FOREIGN KEY (browser_profile_id) REFERENCES browser_profiles(browser_profile_id) ON DELETE CASCADE
             )
         """)
 
@@ -142,7 +142,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_url ON bookmarks(url)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_folder ON bookmarks(folder_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_profile ON bookmarks(browser_profile_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_folder_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_folders_profile ON folders(browser_profile_id)")
 
         # Full-text search virtual table for bookmarks
@@ -153,7 +153,7 @@ class Database:
                 description,
                 notes,
                 content=bookmarks,
-                content_rowid=id
+                content_rowid=bookmark_id
             )
         """)
 
@@ -161,24 +161,46 @@ class Database:
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
                 INSERT INTO bookmarks_fts(rowid, title, url, description, notes)
-                VALUES (new.id, new.title, new.url, new.description, new.notes);
+                VALUES (new.bookmark_id, new.title, new.url, new.description, new.notes);
             END
         """)
 
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
                 INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, url, description, notes)
-                VALUES ('delete', old.id, old.title, old.url, old.description, old.notes);
+                VALUES ('delete', old.bookmark_id, old.title, old.url, old.description, old.notes);
             END
         """)
 
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
                 INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, url, description, notes)
-                VALUES ('delete', old.id, old.title, old.url, old.description, old.notes);
+                VALUES ('delete', old.bookmark_id, old.title, old.url, old.description, old.notes);
                 INSERT INTO bookmarks_fts(rowid, title, url, description, notes)
-                VALUES (new.id, new.title, new.url, new.description, new.notes);
+                VALUES (new.bookmark_id, new.title, new.url, new.description, new.notes);
             END
+        """)
+
+        # View to see bookmarks with their location info for verification
+        cursor.execute("""
+            CREATE VIEW IF NOT EXISTS vw_bookmarks_with_location AS
+            SELECT
+                b.bookmark_id,
+                b.title AS bookmark_title,
+                b.url,
+                b.browser_added_at,
+                f.name AS folder_name,
+                f.browser_folder_path AS folder_path,
+                bp.browser_name,
+                bp.browser_profile_name,
+                bp.profile_display_name,
+                bp.profile_path,
+                -- Construct the full path to the Bookmarks file
+                bp.profile_path || '\\Bookmarks' AS bookmarks_file_path
+            FROM bookmarks b
+            LEFT JOIN folders f ON b.folder_id = f.folder_id
+            LEFT JOIN browser_profiles bp ON b.browser_profile_id = bp.browser_profile_id
+            ORDER BY bp.browser_name, bp.browser_profile_name, f.browser_folder_path, b.position
         """)
 
         conn.commit()
