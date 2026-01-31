@@ -26,6 +26,7 @@ from ..models.bookmark import Bookmark
 from ..models.folder import Folder
 from ..models.browser_profile import BrowserProfile
 from .import_dialog import ImportDialog
+from .dead_link_dialog import DeadLinkDialog
 
 
 class MainWindow(QMainWindow):
@@ -112,6 +113,13 @@ class MainWindow(QMainWindow):
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self.show_import_dialog)
         file_menu.addAction(import_action)
+
+        file_menu.addSeparator()
+
+        dead_link_action = QAction("Check &Dead Links...", self)
+        dead_link_action.setShortcut("Ctrl+D")
+        dead_link_action.triggered.connect(self.show_dead_link_dialog)
+        file_menu.addAction(dead_link_action)
 
         file_menu.addSeparator()
 
@@ -370,6 +378,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
         # Refresh data after import
         self.load_data()
+
+    def show_dead_link_dialog(self):
+        """Show the dead link checker dialog."""
+        dialog = DeadLinkDialog(self)
+        dialog.exec()
 
     def show_about(self):
         """Show about dialog."""
