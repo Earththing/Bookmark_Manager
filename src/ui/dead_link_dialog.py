@@ -3,6 +3,7 @@
 import urllib.request
 import urllib.error
 import ssl
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
@@ -106,7 +107,7 @@ class DeadLinkWorker(QThread):
 
     progress_updated = pyqtSignal(CheckProgress)
     link_checked = pyqtSignal(DeadLinkResult)
-    finished_checking = pyqtSignal(list, int, int)  # dead_links, unique_checked, total_bookmarks
+    finished_checking = pyqtSignal(list, int, int, str)  # dead_links, unique_checked, total_bookmarks, check_run_id
     error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path: str, timeout: int = 10, check_ssl: bool = True, max_workers: int = 10):
@@ -124,13 +125,15 @@ class DeadLinkWorker(QThread):
     def run(self):
         """Run the dead link check with parallel URL checking."""
         try:
+            # Generate unique run ID for this check
+            check_run_id = str(uuid.uuid4())[:8]
+
             # Create thread-local database connection
             db = Database(self.db_path)
             db.initialize_schema()
 
             # Get all bookmarks
             bookmarks = Bookmark.get_all(db)
-            db.close()  # Close DB connection early - we don't need it anymore
 
             # Filter to only HTTP/HTTPS URLs
             http_bookmarks = [
@@ -140,7 +143,8 @@ class DeadLinkWorker(QThread):
             total_bookmarks = len(http_bookmarks)
 
             if total_bookmarks == 0:
-                self.finished_checking.emit([], 0, 0)
+                db.close()
+                self.finished_checking.emit([], 0, 0, check_run_id)
                 return
 
             # Group bookmarks by normalized URL to avoid checking duplicates
@@ -219,11 +223,19 @@ class DeadLinkWorker(QThread):
                             dead_links.append(result)
                             self.link_checked.emit(result)
 
+                            # Save to database
+                            db.execute("""
+                                INSERT INTO dead_links (bookmark_id, check_run_id, status_code, error_message)
+                                VALUES (?, ?, ?, ?)
+                            """, (bookmark.bookmark_id, check_run_id, status_code, error_message))
+
+                        db.commit()
                         progress.dead_count = len(dead_links)
 
                     self.progress_updated.emit(progress)
 
-            self.finished_checking.emit(dead_links, unique_urls, total_bookmarks)
+            db.close()
+            self.finished_checking.emit(dead_links, unique_urls, total_bookmarks, check_run_id)
 
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -237,6 +249,7 @@ class DeadLinkDialog(QDialog):
         self.db = get_database()
         self.worker = None
         self.dead_links = []
+        self.check_run_id = None
 
         self.setWindowTitle("Dead Link Checker")
         self.setMinimumSize(800, 550)
@@ -306,13 +319,16 @@ class DeadLinkDialog(QDialog):
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(5)
         self.results_table.setHorizontalHeaderLabels(["Title", "URL", "Status", "Error", "Copies"])
+        # All columns interactive (resizable) except URL which stretches
         self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.results_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.results_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
         self.results_table.setColumnWidth(0, 200)
+        self.results_table.setColumnWidth(2, 60)
         self.results_table.setColumnWidth(3, 150)
+        self.results_table.setColumnWidth(4, 50)
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.setAlternatingRowColors(True)
         results_layout.addWidget(self.results_table)
@@ -348,6 +364,7 @@ class DeadLinkDialog(QDialog):
         self.ssl_check.setEnabled(False)
         self.results_table.setRowCount(0)
         self.dead_links = []
+        self.check_run_id = None
 
         self.current_label.setText("Starting check...")
         self.progress_bar.setValue(0)
@@ -411,13 +428,14 @@ class DeadLinkDialog(QDialog):
             copies_text = str(result.duplicate_count) if result.duplicate_count > 1 else ""
             self.results_table.setItem(row, 4, QTableWidgetItem(copies_text))
 
-    def on_finished(self, dead_links: list, unique_checked: int, total_bookmarks: int):
+    def on_finished(self, dead_links: list, unique_checked: int, total_bookmarks: int, check_run_id: str):
         """Handle check completion."""
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.timeout_spin.setEnabled(True)
         self.workers_spin.setEnabled(True)
         self.ssl_check.setEnabled(True)
+        self.check_run_id = check_run_id
 
         self.progress_bar.setValue(100)
 
@@ -437,15 +455,18 @@ class DeadLinkDialog(QDialog):
             )
         else:
             self.current_label.setText(
-                f"Check complete! Found {count} dead link(s).\n"
-                f"Checked {unique_checked} unique URLs ({duplicates_saved} duplicate checks skipped)."
+                f"Check complete! Found {count} dead link(s). Run ID: {check_run_id}\n"
+                f"Checked {unique_checked} unique URLs ({duplicates_saved} duplicate checks skipped).\n"
+                f"Results saved to database (view: vw_dead_links)."
             )
             QMessageBox.warning(
                 self, "Check Complete",
                 f"Found {count} dead link(s) in your bookmarks.\n\n"
                 f"Checked {unique_checked} unique URLs.\n"
                 f"Skipped {duplicates_saved} duplicate URL checks.\n\n"
-                "Review the results table below."
+                f"Results saved to database.\n"
+                f"Run ID: {check_run_id}\n"
+                f"Query with: SELECT * FROM vw_dead_links WHERE check_run_id = '{check_run_id}'"
             )
 
     def on_error(self, error_message: str):

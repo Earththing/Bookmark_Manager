@@ -1,5 +1,6 @@
 """Duplicate Bookmark Detection Dialog."""
 
+import uuid
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from urllib.parse import urlparse, parse_qs, urlencode
@@ -97,9 +98,9 @@ class DuplicateFinderWorker(QThread):
     """Worker thread to find duplicate bookmarks."""
 
     progress_updated = pyqtSignal(int, int, str)  # current, total, status
-    exact_duplicates_found = pyqtSignal(list)  # List of DuplicateGroup
-    similar_duplicates_found = pyqtSignal(list)  # List of DuplicateGroup
-    finished_checking = pyqtSignal()
+    exact_duplicates_found = pyqtSignal(list, str)  # List of DuplicateGroup, check_run_id
+    similar_duplicates_found = pyqtSignal(list, str)  # List of DuplicateGroup, check_run_id
+    finished_checking = pyqtSignal(str)  # check_run_id
     error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path: str, similarity_threshold: float = 0.85):
@@ -115,19 +116,22 @@ class DuplicateFinderWorker(QThread):
     def run(self):
         """Find duplicates."""
         try:
+            # Generate unique run ID for this check
+            check_run_id = str(uuid.uuid4())[:8]
+
             # Create thread-local database connection
             db = Database(self.db_path)
             db.initialize_schema()
 
             # Get all bookmarks
             bookmarks = Bookmark.get_all(db)
-            db.close()
 
             total = len(bookmarks)
             if total == 0:
-                self.exact_duplicates_found.emit([])
-                self.similar_duplicates_found.emit([])
-                self.finished_checking.emit()
+                self.exact_duplicates_found.emit([], check_run_id)
+                self.similar_duplicates_found.emit([], check_run_id)
+                self.finished_checking.emit(check_run_id)
+                db.close()
                 return
 
             # Phase 1: Find exact duplicates (by normalized URL)
@@ -136,6 +140,7 @@ class DuplicateFinderWorker(QThread):
             url_to_bookmarks = {}
             for i, bookmark in enumerate(bookmarks):
                 if self._cancelled:
+                    db.close()
                     return
 
                 normalized = normalize_url(bookmark.url)
@@ -146,18 +151,34 @@ class DuplicateFinderWorker(QThread):
                 if i % 100 == 0:
                     self.progress_updated.emit(i, total, "Finding exact duplicates...")
 
-            # Filter to only groups with duplicates
+            # Filter to only groups with duplicates and save to database
             exact_groups = []
             for normalized_url, group_bookmarks in url_to_bookmarks.items():
                 if len(group_bookmarks) > 1:
-                    exact_groups.append(DuplicateGroup(
+                    group = DuplicateGroup(
                         canonical_url=normalized_url,
                         bookmarks=group_bookmarks,
                         match_type="exact",
                         similarity=1.0
-                    ))
+                    )
+                    exact_groups.append(group)
 
-            self.exact_duplicates_found.emit(exact_groups)
+                    # Save to database
+                    cursor = db.execute("""
+                        INSERT INTO duplicate_groups (check_run_id, normalized_url, match_type, similarity)
+                        VALUES (?, ?, ?, ?)
+                    """, (check_run_id, normalized_url, "exact", 1.0))
+                    group_id = cursor.lastrowid
+
+                    # Save group members
+                    for bookmark in group_bookmarks:
+                        db.execute("""
+                            INSERT INTO duplicate_group_members (duplicate_group_id, bookmark_id)
+                            VALUES (?, ?)
+                        """, (group_id, bookmark.bookmark_id))
+
+            db.commit()
+            self.exact_duplicates_found.emit(exact_groups, check_run_id)
 
             # Phase 2: Find similar URLs (fuzzy matching)
             # Only compare unique normalized URLs to avoid redundant comparisons
@@ -169,6 +190,7 @@ class DuplicateFinderWorker(QThread):
 
             for i, url1 in enumerate(unique_urls):
                 if self._cancelled:
+                    db.close()
                     return
 
                 if i % 10 == 0:
@@ -184,16 +206,33 @@ class DuplicateFinderWorker(QThread):
                     if similarity >= self.similarity_threshold and similarity < 1.0:
                         # Combine bookmarks from both URLs
                         combined_bookmarks = url_to_bookmarks[url1] + url_to_bookmarks[url2]
-                        similar_groups.append(DuplicateGroup(
+                        group = DuplicateGroup(
                             canonical_url=f"{url1} <-> {url2}",
                             bookmarks=combined_bookmarks,
                             match_type="similar",
                             similarity=similarity
-                        ))
+                        )
+                        similar_groups.append(group)
 
-            self.similar_duplicates_found.emit(similar_groups)
+                        # Save to database
+                        cursor = db.execute("""
+                            INSERT INTO duplicate_groups (check_run_id, normalized_url, match_type, similarity)
+                            VALUES (?, ?, ?, ?)
+                        """, (check_run_id, f"{url1} <-> {url2}", "similar", similarity))
+                        group_id = cursor.lastrowid
+
+                        # Save group members
+                        for bookmark in combined_bookmarks:
+                            db.execute("""
+                                INSERT INTO duplicate_group_members (duplicate_group_id, bookmark_id)
+                                VALUES (?, ?)
+                            """, (group_id, bookmark.bookmark_id))
+
+            db.commit()
+            self.similar_duplicates_found.emit(similar_groups, check_run_id)
             self.progress_updated.emit(total, total, "Complete!")
-            self.finished_checking.emit()
+            self.finished_checking.emit(check_run_id)
+            db.close()
 
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -208,9 +247,10 @@ class DuplicateDialog(QDialog):
         self.worker = None
         self.exact_groups = []
         self.similar_groups = []
+        self.check_run_id = None
 
         self.setWindowTitle("Duplicate Bookmark Finder")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(900, 600)
         self.setup_ui()
 
     def setup_ui(self):
@@ -254,17 +294,19 @@ class DuplicateDialog(QDialog):
         exact_layout = QVBoxLayout(exact_widget)
         self.exact_table = QTableWidget()
         self.exact_table.setColumnCount(5)
-        self.exact_table.setHorizontalHeaderLabels(["Title", "URL", "Folder", "Profile", "Count"])
+        self.exact_table.setHorizontalHeaderLabels(["Title", "URL", "Folder", "Profile", "Group Size"])
+        # All columns interactive (resizable) except URL which stretches
         self.exact_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.exact_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.exact_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.exact_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.exact_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.exact_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
         self.exact_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.exact_table.setAlternatingRowColors(True)
         self.exact_table.setColumnWidth(0, 200)
         self.exact_table.setColumnWidth(2, 120)
-        self.exact_table.setColumnWidth(3, 120)
+        self.exact_table.setColumnWidth(3, 150)
+        self.exact_table.setColumnWidth(4, 70)
         exact_layout.addWidget(self.exact_table)
         self.tab_widget.addTab(exact_widget, "Exact Duplicates (0)")
 
@@ -274,16 +316,18 @@ class DuplicateDialog(QDialog):
         self.similar_table = QTableWidget()
         self.similar_table.setColumnCount(5)
         self.similar_table.setHorizontalHeaderLabels(["Title", "URL", "Folder", "Profile", "Similarity"])
+        # All columns interactive (resizable) except URL which stretches
         self.similar_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.similar_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.similar_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.similar_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.similar_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.similar_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
         self.similar_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.similar_table.setAlternatingRowColors(True)
         self.similar_table.setColumnWidth(0, 200)
         self.similar_table.setColumnWidth(2, 120)
-        self.similar_table.setColumnWidth(3, 120)
+        self.similar_table.setColumnWidth(3, 150)
+        self.similar_table.setColumnWidth(4, 70)
         similar_layout.addWidget(self.similar_table)
         self.tab_widget.addTab(similar_widget, "Similar URLs (0)")
 
@@ -318,6 +362,7 @@ class DuplicateDialog(QDialog):
         self.similar_table.setRowCount(0)
         self.exact_groups = []
         self.similar_groups = []
+        self.check_run_id = None
 
         self.status_label.setText("Starting search...")
         self.progress_bar.setValue(0)
@@ -348,9 +393,10 @@ class DuplicateDialog(QDialog):
             self.progress_bar.setValue(percent)
         self.status_label.setText(status)
 
-    def on_exact_found(self, groups: list):
+    def on_exact_found(self, groups: list, check_run_id: str):
         """Handle exact duplicates found."""
         self.exact_groups = groups
+        self.check_run_id = check_run_id
 
         # Count total duplicate bookmarks (not groups)
         total_duplicates = sum(len(g.bookmarks) for g in groups)
@@ -368,7 +414,7 @@ class DuplicateDialog(QDialog):
                 self.exact_table.setItem(row, 3, QTableWidgetItem(""))  # TODO: profile name
                 self.exact_table.setItem(row, 4, QTableWidgetItem(str(len(group.bookmarks))))
 
-    def on_similar_found(self, groups: list):
+    def on_similar_found(self, groups: list, check_run_id: str):
         """Handle similar URLs found."""
         self.similar_groups = groups
 
@@ -387,26 +433,40 @@ class DuplicateDialog(QDialog):
                 self.similar_table.setItem(row, 3, QTableWidgetItem(""))  # TODO: profile name
                 self.similar_table.setItem(row, 4, QTableWidgetItem(f"{group.similarity:.0%}"))
 
-    def on_finished(self):
+    def on_finished(self, check_run_id: str):
         """Handle search completion."""
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.threshold_spin.setEnabled(True)
+        self.check_run_id = check_run_id
 
         self.progress_bar.setValue(100)
 
         exact_count = sum(len(g.bookmarks) for g in self.exact_groups)
         similar_count = sum(len(g.bookmarks) for g in self.similar_groups)
 
-        self.status_label.setText(
-            f"Complete! Found {exact_count} exact duplicates in {len(self.exact_groups)} groups, "
-            f"{similar_count} similar URLs in {len(self.similar_groups)} groups."
-        )
-
         if exact_count == 0 and similar_count == 0:
+            self.status_label.setText("Complete! No duplicate bookmarks were found.")
             QMessageBox.information(
                 self, "Search Complete",
                 "No duplicate bookmarks were found."
+            )
+        else:
+            self.status_label.setText(
+                f"Complete! Found {exact_count} exact duplicates in {len(self.exact_groups)} groups, "
+                f"{similar_count} similar URLs in {len(self.similar_groups)} groups.\n"
+                f"Run ID: {check_run_id}. Results saved to database."
+            )
+            QMessageBox.information(
+                self, "Search Complete",
+                f"Found {exact_count} exact duplicates in {len(self.exact_groups)} groups.\n"
+                f"Found {similar_count} similar URLs in {len(self.similar_groups)} groups.\n\n"
+                f"Results saved to database.\n"
+                f"Run ID: {check_run_id}\n\n"
+                f"Query exact duplicates:\n"
+                f"SELECT * FROM vw_duplicates_exact WHERE check_run_id = '{check_run_id}'\n\n"
+                f"Query similar URLs:\n"
+                f"SELECT * FROM vw_duplicates_similar WHERE check_run_id = '{check_run_id}'"
             )
 
     def on_error(self, error_message: str):

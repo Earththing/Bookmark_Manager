@@ -203,6 +203,118 @@ class Database:
             ORDER BY bp.browser_name, bp.browser_profile_name, f.browser_folder_path, b.position
         """)
 
+        # Dead links table - stores results of dead link checks
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dead_links (
+                dead_link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bookmark_id INTEGER NOT NULL,
+                check_run_id TEXT NOT NULL,
+                status_code INTEGER,
+                error_message TEXT,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(bookmark_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dead_links_bookmark ON dead_links(bookmark_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dead_links_run ON dead_links(check_run_id)")
+
+        # Duplicate groups table - stores duplicate detection results
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS duplicate_groups (
+                duplicate_group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                check_run_id TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                match_type TEXT NOT NULL,
+                similarity REAL DEFAULT 1.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_duplicate_groups_run ON duplicate_groups(check_run_id)")
+
+        # Duplicate group members - links bookmarks to their duplicate groups
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS duplicate_group_members (
+                duplicate_group_id INTEGER NOT NULL,
+                bookmark_id INTEGER NOT NULL,
+                PRIMARY KEY (duplicate_group_id, bookmark_id),
+                FOREIGN KEY (duplicate_group_id) REFERENCES duplicate_groups(duplicate_group_id) ON DELETE CASCADE,
+                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(bookmark_id) ON DELETE CASCADE
+            )
+        """)
+
+        # View for dead links with bookmark details
+        cursor.execute("""
+            CREATE VIEW IF NOT EXISTS vw_dead_links AS
+            SELECT
+                dl.dead_link_id,
+                dl.check_run_id,
+                dl.status_code,
+                dl.error_message,
+                dl.checked_at,
+                b.bookmark_id,
+                b.title,
+                b.url,
+                f.name AS folder_name,
+                bp.browser_name,
+                bp.profile_display_name
+            FROM dead_links dl
+            JOIN bookmarks b ON dl.bookmark_id = b.bookmark_id
+            LEFT JOIN folders f ON b.folder_id = f.folder_id
+            LEFT JOIN browser_profiles bp ON b.browser_profile_id = bp.browser_profile_id
+            ORDER BY dl.checked_at DESC, b.title
+        """)
+
+        # View for exact duplicates with bookmark details
+        cursor.execute("""
+            CREATE VIEW IF NOT EXISTS vw_duplicates_exact AS
+            SELECT
+                dg.duplicate_group_id,
+                dg.check_run_id,
+                dg.normalized_url,
+                dg.created_at AS detected_at,
+                b.bookmark_id,
+                b.title,
+                b.url,
+                f.name AS folder_name,
+                bp.browser_name,
+                bp.profile_display_name,
+                (SELECT COUNT(*) FROM duplicate_group_members dgm2
+                 WHERE dgm2.duplicate_group_id = dg.duplicate_group_id) AS group_size
+            FROM duplicate_groups dg
+            JOIN duplicate_group_members dgm ON dg.duplicate_group_id = dgm.duplicate_group_id
+            JOIN bookmarks b ON dgm.bookmark_id = b.bookmark_id
+            LEFT JOIN folders f ON b.folder_id = f.folder_id
+            LEFT JOIN browser_profiles bp ON b.browser_profile_id = bp.browser_profile_id
+            WHERE dg.match_type = 'exact'
+            ORDER BY dg.duplicate_group_id, b.title
+        """)
+
+        # View for similar duplicates with bookmark details
+        cursor.execute("""
+            CREATE VIEW IF NOT EXISTS vw_duplicates_similar AS
+            SELECT
+                dg.duplicate_group_id,
+                dg.check_run_id,
+                dg.normalized_url,
+                dg.similarity,
+                dg.created_at AS detected_at,
+                b.bookmark_id,
+                b.title,
+                b.url,
+                f.name AS folder_name,
+                bp.browser_name,
+                bp.profile_display_name,
+                (SELECT COUNT(*) FROM duplicate_group_members dgm2
+                 WHERE dgm2.duplicate_group_id = dg.duplicate_group_id) AS group_size
+            FROM duplicate_groups dg
+            JOIN duplicate_group_members dgm ON dg.duplicate_group_id = dgm.duplicate_group_id
+            JOIN bookmarks b ON dgm.bookmark_id = b.bookmark_id
+            LEFT JOIN folders f ON b.folder_id = f.folder_id
+            LEFT JOIN browser_profiles bp ON b.browser_profile_id = bp.browser_profile_id
+            WHERE dg.match_type = 'similar'
+            ORDER BY dg.similarity DESC, dg.duplicate_group_id, b.title
+        """)
+
         conn.commit()
 
     def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
