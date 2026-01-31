@@ -27,6 +27,7 @@ from ..models.folder import Folder
 from ..models.browser_profile import BrowserProfile
 from .import_dialog import ImportDialog
 from .dead_link_dialog import DeadLinkDialog
+from .duplicate_dialog import DuplicateDialog
 
 
 class MainWindow(QMainWindow):
@@ -120,6 +121,11 @@ class MainWindow(QMainWindow):
         dead_link_action.setShortcut("Ctrl+D")
         dead_link_action.triggered.connect(self.show_dead_link_dialog)
         file_menu.addAction(dead_link_action)
+
+        duplicate_action = QAction("Find D&uplicates...", self)
+        duplicate_action.setShortcut("Ctrl+U")
+        duplicate_action.triggered.connect(self.show_duplicate_dialog)
+        file_menu.addAction(duplicate_action)
 
         file_menu.addSeparator()
 
@@ -382,6 +388,11 @@ class MainWindow(QMainWindow):
     def show_dead_link_dialog(self):
         """Show the dead link checker dialog."""
         dialog = DeadLinkDialog(self)
+        dialog.exec()
+
+    def show_duplicate_dialog(self):
+        """Show the duplicate finder dialog."""
+        dialog = DuplicateDialog(self)
         dialog.exec()
 
     def show_about(self):

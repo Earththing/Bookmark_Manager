@@ -4,7 +4,7 @@ import urllib.request
 import urllib.error
 import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
@@ -15,6 +15,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from ..models.database import Database, get_database
 from ..models.bookmark import Bookmark
+from .duplicate_dialog import normalize_url
 
 
 @dataclass
@@ -26,6 +27,7 @@ class DeadLinkResult:
     status_code: Optional[int] = None
     error_message: Optional[str] = None
     is_dead: bool = False
+    duplicate_count: int = 1  # How many bookmarks share this URL
 
 
 @dataclass
@@ -33,6 +35,8 @@ class CheckProgress:
     """Progress information for dead link checking."""
     current: int = 0
     total: int = 0
+    total_bookmarks: int = 0  # Total bookmarks (including duplicates)
+    unique_urls: int = 0  # Number of unique URLs to check
     current_url: str = ""
     current_title: str = ""
     dead_count: int = 0
@@ -102,7 +106,7 @@ class DeadLinkWorker(QThread):
 
     progress_updated = pyqtSignal(CheckProgress)
     link_checked = pyqtSignal(DeadLinkResult)
-    finished_checking = pyqtSignal(list)  # List of DeadLinkResult for dead links
+    finished_checking = pyqtSignal(list, int, int)  # dead_links, unique_checked, total_bookmarks
     error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path: str, timeout: int = 10, check_ssl: bool = True, max_workers: int = 10):
@@ -133,39 +137,59 @@ class DeadLinkWorker(QThread):
                 b for b in bookmarks
                 if b.url.startswith(('http://', 'https://'))
             ]
-            total = len(http_bookmarks)
+            total_bookmarks = len(http_bookmarks)
 
-            if total == 0:
-                self.finished_checking.emit([])
+            if total_bookmarks == 0:
+                self.finished_checking.emit([], 0, 0)
                 return
+
+            # Group bookmarks by normalized URL to avoid checking duplicates
+            url_to_bookmarks = {}
+            for bookmark in http_bookmarks:
+                normalized = normalize_url(bookmark.url)
+                if normalized not in url_to_bookmarks:
+                    url_to_bookmarks[normalized] = []
+                url_to_bookmarks[normalized].append(bookmark)
+
+            unique_urls = len(url_to_bookmarks)
 
             dead_links = []
             checked_count = 0
-            progress = CheckProgress(total=total)
+            progress = CheckProgress(
+                total=unique_urls,
+                total_bookmarks=total_bookmarks,
+                unique_urls=unique_urls
+            )
 
             # Use ThreadPoolExecutor for parallel URL checking
+            # Only check one URL per normalized group
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit all URL checks
-                future_to_bookmark = {
-                    executor.submit(
+                # Submit checks for unique URLs only (use first bookmark's URL from each group)
+                future_to_normalized = {}
+                for normalized_url, bookmark_group in url_to_bookmarks.items():
+                    # Use the first bookmark's actual URL for checking
+                    actual_url = bookmark_group[0].url
+                    future = executor.submit(
                         check_single_url,
-                        bookmark.url,
+                        actual_url,
                         self.timeout,
                         self.check_ssl
-                    ): bookmark
-                    for bookmark in http_bookmarks
-                }
+                    )
+                    future_to_normalized[future] = (normalized_url, bookmark_group)
 
                 # Process results as they complete
-                for future in as_completed(future_to_bookmark):
+                for future in as_completed(future_to_normalized):
                     if self._cancelled:
                         # Cancel remaining futures
-                        for f in future_to_bookmark:
+                        for f in future_to_normalized:
                             f.cancel()
                         break
 
-                    bookmark = future_to_bookmark[future]
+                    normalized_url, bookmark_group = future_to_normalized[future]
                     checked_count += 1
+
+                    # Use first bookmark for display purposes
+                    first_bookmark = bookmark_group[0]
 
                     try:
                         is_dead, status_code, error_message = future.result()
@@ -174,29 +198,32 @@ class DeadLinkWorker(QThread):
                         status_code = None
                         error_message = f"Error: {str(e)}"
 
-                    result = DeadLinkResult(
-                        bookmark_id=bookmark.bookmark_id,
-                        title=bookmark.title or "(No title)",
-                        url=bookmark.url,
-                        status_code=status_code,
-                        error_message=error_message,
-                        is_dead=is_dead
-                    )
-
-                    self.link_checked.emit(result)
-
-                    if is_dead:
-                        dead_links.append(result)
-
                     # Update progress
                     progress.current = checked_count
                     progress.checked_count = checked_count
-                    progress.current_url = bookmark.url
-                    progress.current_title = bookmark.title or "(No title)"
-                    progress.dead_count = len(dead_links)
+                    progress.current_url = first_bookmark.url
+                    progress.current_title = first_bookmark.title or "(No title)"
+
+                    # If dead, create results for ALL bookmarks in this group
+                    if is_dead:
+                        for bookmark in bookmark_group:
+                            result = DeadLinkResult(
+                                bookmark_id=bookmark.bookmark_id,
+                                title=bookmark.title or "(No title)",
+                                url=bookmark.url,
+                                status_code=status_code,
+                                error_message=error_message,
+                                is_dead=True,
+                                duplicate_count=len(bookmark_group)
+                            )
+                            dead_links.append(result)
+                            self.link_checked.emit(result)
+
+                        progress.dead_count = len(dead_links)
+
                     self.progress_updated.emit(progress)
 
-            self.finished_checking.emit(dead_links)
+            self.finished_checking.emit(dead_links, unique_urls, total_bookmarks)
 
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -212,7 +239,7 @@ class DeadLinkDialog(QDialog):
         self.dead_links = []
 
         self.setWindowTitle("Dead Link Checker")
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(800, 550)
         self.setup_ui()
 
     def setup_ui(self):
@@ -265,7 +292,7 @@ class DeadLinkDialog(QDialog):
 
         # Stats
         stats_layout = QHBoxLayout()
-        self.stats_label = QLabel("Checked: 0 / 0  |  Dead links found: 0")
+        self.stats_label = QLabel("Checked: 0 / 0 unique URLs  |  Dead links found: 0")
         stats_layout.addWidget(self.stats_label)
         stats_layout.addStretch()
         progress_layout.addLayout(stats_layout)
@@ -277,12 +304,15 @@ class DeadLinkDialog(QDialog):
         results_layout = QVBoxLayout(results_group)
 
         self.results_table = QTableWidget()
-        self.results_table.setColumnCount(4)
-        self.results_table.setHorizontalHeaderLabels(["Title", "URL", "Status", "Error"])
-        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.results_table.setColumnCount(5)
+        self.results_table.setHorizontalHeaderLabels(["Title", "URL", "Status", "Error", "Copies"])
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.results_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.results_table.setColumnWidth(0, 200)
+        self.results_table.setColumnWidth(3, 150)
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.setAlternatingRowColors(True)
         results_layout.addWidget(self.results_table)
@@ -355,7 +385,8 @@ class DeadLinkDialog(QDialog):
 
         self.current_label.setText(f"Checking: {progress.current_title}\n{url_display}")
         self.stats_label.setText(
-            f"Checked: {progress.checked_count} / {progress.total}  |  "
+            f"Checked: {progress.checked_count} / {progress.unique_urls} unique URLs "
+            f"({progress.total_bookmarks} total bookmarks)  |  "
             f"Dead links found: {progress.dead_count}"
         )
 
@@ -376,7 +407,11 @@ class DeadLinkDialog(QDialog):
             error_text = result.error_message or ""
             self.results_table.setItem(row, 3, QTableWidgetItem(error_text))
 
-    def on_finished(self, dead_links: list):
+            # Show duplicate count (only if > 1)
+            copies_text = str(result.duplicate_count) if result.duplicate_count > 1 else ""
+            self.results_table.setItem(row, 4, QTableWidgetItem(copies_text))
+
+    def on_finished(self, dead_links: list, unique_checked: int, total_bookmarks: int):
         """Handle check completion."""
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -387,17 +422,29 @@ class DeadLinkDialog(QDialog):
         self.progress_bar.setValue(100)
 
         count = len(dead_links)
+        duplicates_saved = total_bookmarks - unique_checked
+
         if count == 0:
-            self.current_label.setText("Check complete! No dead links found.")
+            self.current_label.setText(
+                f"Check complete! No dead links found.\n"
+                f"Checked {unique_checked} unique URLs ({duplicates_saved} duplicate checks skipped)."
+            )
             QMessageBox.information(
                 self, "Check Complete",
-                "No dead links were found in your bookmarks."
+                f"No dead links were found in your bookmarks.\n\n"
+                f"Checked {unique_checked} unique URLs.\n"
+                f"Skipped {duplicates_saved} duplicate URL checks."
             )
         else:
-            self.current_label.setText(f"Check complete! Found {count} dead link(s).")
+            self.current_label.setText(
+                f"Check complete! Found {count} dead link(s).\n"
+                f"Checked {unique_checked} unique URLs ({duplicates_saved} duplicate checks skipped)."
+            )
             QMessageBox.warning(
                 self, "Check Complete",
                 f"Found {count} dead link(s) in your bookmarks.\n\n"
+                f"Checked {unique_checked} unique URLs.\n"
+                f"Skipped {duplicates_saved} duplicate URL checks.\n\n"
                 "Review the results table below."
             )
 
