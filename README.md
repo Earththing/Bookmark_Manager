@@ -47,18 +47,19 @@ pip install PyQt6
 
 ### Running the GUI Application
 
-From the `src` directory:
+From the project root:
 ```bash
-cd src
-python main.py
-```
-
-Or from the project root:
-```bash
-python -m src.main
+python -m src.gui
 ```
 
 This launches the graphical user interface where you can browse, search, and manage your bookmarks.
+
+### Running the CLI (Command Line)
+
+For a command-line import (useful for scripting):
+```bash
+python -m src.main
+```
 
 ### First Run
 

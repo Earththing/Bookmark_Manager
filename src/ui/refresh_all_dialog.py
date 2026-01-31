@@ -127,28 +127,37 @@ class RefreshAllWorker(QThread):
             db.close()
             return "No browser profiles found"
 
+        # Filter to only profiles with bookmarks
+        profiles_with_bookmarks = [p for p in profiles if p.has_bookmarks_file]
+
+        if not profiles_with_bookmarks:
+            db.close()
+            return "No profiles with bookmarks found"
+
         import_service = ImportService(db)
         total_imported = 0
         total_skipped = 0
         profiles_processed = 0
 
-        for i, profile in enumerate(profiles):
+        for i, profile in enumerate(profiles_with_bookmarks):
             if self._cancelled:
                 break
 
-            self.progress_updated.emit(i + 1, len(profiles), "Importing")
+            profile_name = profile.profile_name or profile.profile_id
+            status_msg = f"Importing {profile.browser_name}/{profile_name} ({profile.bookmark_count} bookmarks)"
+            self.status_updated.emit(status_msg)
+            self.progress_updated.emit(i, len(profiles_with_bookmarks), "Importing")
 
             try:
-                # Only import profiles that have bookmarks
-                if profile.has_bookmarks_file:
-                    result = import_service.import_profile(profile)
-                    total_imported += result.bookmarks_added
-                    total_skipped += result.bookmarks_skipped
-                    profiles_processed += 1
+                result = import_service.import_profile(profile)
+                total_imported += result.bookmarks_added
+                total_skipped += result.bookmarks_skipped
+                profiles_processed += 1
             except Exception as e:
                 # Continue with other profiles
                 pass
 
+        self.progress_updated.emit(len(profiles_with_bookmarks), len(profiles_with_bookmarks), "Importing")
         db.close()
         return f"Imported {total_imported} new bookmarks from {profiles_processed} profiles ({total_skipped} skipped)"
 
@@ -165,19 +174,34 @@ class RefreshAllWorker(QThread):
             db.close()
             return "No bookmarks to check"
 
+        total_bookmarks = len(bookmarks)
+        self.progress_updated.emit(0, total_bookmarks, "Analyzing URLs")
+
         # Group by normalized URL
         url_to_bookmarks = {}
-        for bookmark in bookmarks:
+        for i, bookmark in enumerate(bookmarks):
+            if self._cancelled:
+                db.close()
+                return "Cancelled"
+
             normalized = normalize_url(bookmark.url)
             if normalized not in url_to_bookmarks:
                 url_to_bookmarks[normalized] = []
             url_to_bookmarks[normalized].append(bookmark)
 
+            # Update progress every 100 bookmarks
+            if i % 100 == 0:
+                self.progress_updated.emit(i, total_bookmarks, "Analyzing URLs")
+
+        self.progress_updated.emit(total_bookmarks, total_bookmarks, "Saving duplicates")
+
         # Find duplicates
         exact_groups = 0
         exact_bookmarks = 0
+        unique_urls = list(url_to_bookmarks.items())
+        total_urls = len(unique_urls)
 
-        for normalized_url, group_bookmarks in url_to_bookmarks.items():
+        for i, (normalized_url, group_bookmarks) in enumerate(unique_urls):
             if self._cancelled:
                 break
 
@@ -197,6 +221,10 @@ class RefreshAllWorker(QThread):
                         INSERT INTO duplicate_group_members (duplicate_group_id, bookmark_id)
                         VALUES (?, ?)
                     """, (group_id, bookmark.bookmark_id))
+
+            # Update progress every 50 URLs
+            if i % 50 == 0:
+                self.progress_updated.emit(i, total_urls, "Saving duplicates")
 
         db.commit()
         db.close()
