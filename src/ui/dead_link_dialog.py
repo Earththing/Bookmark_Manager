@@ -3,6 +3,7 @@
 import urllib.request
 import urllib.error
 import ssl
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional
 from PyQt6.QtWidgets import (
@@ -38,84 +39,86 @@ class CheckProgress:
     checked_count: int = 0
 
 
+def check_single_url(url: str, timeout: int, check_ssl: bool) -> tuple[bool, Optional[int], Optional[str]]:
+    """
+    Check if a URL is accessible (standalone function for thread pool).
+
+    Returns: (is_dead, status_code, error_message)
+    """
+    try:
+        # Create SSL context
+        if check_ssl:
+            ssl_context = ssl.create_default_context()
+        else:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        # Create request with a browser-like User-Agent
+        request = urllib.request.Request(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            method='HEAD'  # Use HEAD request to be faster and more polite
+        )
+
+        # Try HEAD request first
+        try:
+            response = urllib.request.urlopen(
+                request,
+                timeout=timeout,
+                context=ssl_context
+            )
+            return (False, response.getcode(), None)
+        except urllib.error.HTTPError as e:
+            # Some servers don't support HEAD, try GET
+            if e.code == 405:  # Method Not Allowed
+                request.method = 'GET'
+                response = urllib.request.urlopen(
+                    request,
+                    timeout=timeout,
+                    context=ssl_context
+                )
+                return (False, response.getcode(), None)
+            # Consider 4xx and 5xx as potentially dead
+            if e.code >= 400:
+                return (True, e.code, f"HTTP {e.code}: {e.reason}")
+            return (False, e.code, None)
+
+    except urllib.error.URLError as e:
+        return (True, None, f"URL Error: {str(e.reason)}")
+    except ssl.SSLError as e:
+        return (True, None, f"SSL Error: {str(e)}")
+    except TimeoutError:
+        return (True, None, "Timeout")
+    except Exception as e:
+        return (True, None, f"Error: {str(e)}")
+
+
 class DeadLinkWorker(QThread):
-    """Worker thread to check bookmarks for dead links."""
+    """Worker thread to check bookmarks for dead links using parallel requests."""
 
     progress_updated = pyqtSignal(CheckProgress)
     link_checked = pyqtSignal(DeadLinkResult)
     finished_checking = pyqtSignal(list)  # List of DeadLinkResult for dead links
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, db_path: str, timeout: int = 10, check_ssl: bool = True):
+    def __init__(self, db_path: str, timeout: int = 10, check_ssl: bool = True, max_workers: int = 10):
         super().__init__()
         self.db_path = db_path
         self.timeout = timeout
         self.check_ssl = check_ssl
+        self.max_workers = max_workers
         self._cancelled = False
 
     def cancel(self):
         """Request cancellation of the check."""
         self._cancelled = True
 
-    def check_url(self, url: str) -> tuple[bool, Optional[int], Optional[str]]:
-        """
-        Check if a URL is accessible.
-
-        Returns: (is_dead, status_code, error_message)
-        """
-        try:
-            # Create SSL context
-            if self.check_ssl:
-                ssl_context = ssl.create_default_context()
-            else:
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-            # Create request with a browser-like User-Agent
-            request = urllib.request.Request(
-                url,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                },
-                method='HEAD'  # Use HEAD request to be faster and more polite
-            )
-
-            # Try HEAD request first
-            try:
-                response = urllib.request.urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=ssl_context
-                )
-                return (False, response.getcode(), None)
-            except urllib.error.HTTPError as e:
-                # Some servers don't support HEAD, try GET
-                if e.code == 405:  # Method Not Allowed
-                    request.method = 'GET'
-                    response = urllib.request.urlopen(
-                        request,
-                        timeout=self.timeout,
-                        context=ssl_context
-                    )
-                    return (False, response.getcode(), None)
-                # Consider 4xx and 5xx as potentially dead
-                if e.code >= 400:
-                    return (True, e.code, f"HTTP {e.code}: {e.reason}")
-                return (False, e.code, None)
-
-        except urllib.error.URLError as e:
-            return (True, None, f"URL Error: {str(e.reason)}")
-        except ssl.SSLError as e:
-            return (True, None, f"SSL Error: {str(e)}")
-        except TimeoutError:
-            return (True, None, "Timeout")
-        except Exception as e:
-            return (True, None, f"Error: {str(e)}")
-
     def run(self):
-        """Run the dead link check."""
+        """Run the dead link check with parallel URL checking."""
         try:
             # Create thread-local database connection
             db = Database(self.db_path)
@@ -123,50 +126,76 @@ class DeadLinkWorker(QThread):
 
             # Get all bookmarks
             bookmarks = Bookmark.get_all(db)
-            total = len(bookmarks)
+            db.close()  # Close DB connection early - we don't need it anymore
+
+            # Filter to only HTTP/HTTPS URLs
+            http_bookmarks = [
+                b for b in bookmarks
+                if b.url.startswith(('http://', 'https://'))
+            ]
+            total = len(http_bookmarks)
 
             if total == 0:
                 self.finished_checking.emit([])
-                db.close()
                 return
 
             dead_links = []
+            checked_count = 0
             progress = CheckProgress(total=total)
 
-            for i, bookmark in enumerate(bookmarks):
-                if self._cancelled:
-                    break
+            # Use ThreadPoolExecutor for parallel URL checking
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit all URL checks
+                future_to_bookmark = {
+                    executor.submit(
+                        check_single_url,
+                        bookmark.url,
+                        self.timeout,
+                        self.check_ssl
+                    ): bookmark
+                    for bookmark in http_bookmarks
+                }
 
-                progress.current = i + 1
-                progress.current_url = bookmark.url
-                progress.current_title = bookmark.title or "(No title)"
-                progress.checked_count = i + 1
+                # Process results as they complete
+                for future in as_completed(future_to_bookmark):
+                    if self._cancelled:
+                        # Cancel remaining futures
+                        for f in future_to_bookmark:
+                            f.cancel()
+                        break
 
-                self.progress_updated.emit(progress)
+                    bookmark = future_to_bookmark[future]
+                    checked_count += 1
 
-                # Skip non-HTTP URLs
-                if not bookmark.url.startswith(('http://', 'https://')):
-                    continue
+                    try:
+                        is_dead, status_code, error_message = future.result()
+                    except Exception as e:
+                        is_dead = True
+                        status_code = None
+                        error_message = f"Error: {str(e)}"
 
-                # Check the URL
-                is_dead, status_code, error_message = self.check_url(bookmark.url)
+                    result = DeadLinkResult(
+                        bookmark_id=bookmark.bookmark_id,
+                        title=bookmark.title or "(No title)",
+                        url=bookmark.url,
+                        status_code=status_code,
+                        error_message=error_message,
+                        is_dead=is_dead
+                    )
 
-                result = DeadLinkResult(
-                    bookmark_id=bookmark.bookmark_id,
-                    title=bookmark.title or "(No title)",
-                    url=bookmark.url,
-                    status_code=status_code,
-                    error_message=error_message,
-                    is_dead=is_dead
-                )
+                    self.link_checked.emit(result)
 
-                self.link_checked.emit(result)
+                    if is_dead:
+                        dead_links.append(result)
 
-                if is_dead:
-                    dead_links.append(result)
+                    # Update progress
+                    progress.current = checked_count
+                    progress.checked_count = checked_count
+                    progress.current_url = bookmark.url
+                    progress.current_title = bookmark.title or "(No title)"
                     progress.dead_count = len(dead_links)
+                    self.progress_updated.emit(progress)
 
-            db.close()
             self.finished_checking.emit(dead_links)
 
         except Exception as e:
@@ -199,6 +228,15 @@ class DeadLinkDialog(QDialog):
         self.timeout_spin.setRange(5, 60)
         self.timeout_spin.setValue(10)
         options_layout.addWidget(self.timeout_spin)
+
+        options_layout.addSpacing(20)
+
+        options_layout.addWidget(QLabel("Parallel checks:"))
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 20)
+        self.workers_spin.setValue(10)
+        self.workers_spin.setToolTip("Number of URLs to check simultaneously")
+        options_layout.addWidget(self.workers_spin)
 
         options_layout.addSpacing(20)
 
@@ -276,6 +314,7 @@ class DeadLinkDialog(QDialog):
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.timeout_spin.setEnabled(False)
+        self.workers_spin.setEnabled(False)
         self.ssl_check.setEnabled(False)
         self.results_table.setRowCount(0)
         self.dead_links = []
@@ -287,7 +326,8 @@ class DeadLinkDialog(QDialog):
         self.worker = DeadLinkWorker(
             self.db.db_path,
             timeout=self.timeout_spin.value(),
-            check_ssl=self.ssl_check.isChecked()
+            check_ssl=self.ssl_check.isChecked(),
+            max_workers=self.workers_spin.value()
         )
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.link_checked.connect(self.on_link_checked)
@@ -341,6 +381,7 @@ class DeadLinkDialog(QDialog):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.timeout_spin.setEnabled(True)
+        self.workers_spin.setEnabled(True)
         self.ssl_check.setEnabled(True)
 
         self.progress_bar.setValue(100)
@@ -365,6 +406,7 @@ class DeadLinkDialog(QDialog):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.timeout_spin.setEnabled(True)
+        self.workers_spin.setEnabled(True)
         self.ssl_check.setEnabled(True)
 
         self.current_label.setText(f"Error: {error_message}")
