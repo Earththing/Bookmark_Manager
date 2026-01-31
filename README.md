@@ -1,6 +1,10 @@
 # Bookmark Manager
 
-A desktop application to organize and manage bookmarks imported from Chrome and Edge browsers.
+A **desktop GUI application** (built with PyQt6) to organize and manage bookmarks imported from Chrome and Edge browsers.
+
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![PyQt6](https://img.shields.io/badge/PyQt6-GUI-green.svg)
+![SQLite](https://img.shields.io/badge/SQLite-Database-orange.svg)
 
 ## Features
 
@@ -28,8 +32,8 @@ A desktop application to organize and manage bookmarks imported from Chrome and 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/Bookmark-Manager.git
-cd Bookmark-Manager
+git clone https://github.com/Earththing/Bookmark_Manager.git
+cd Bookmark_Manager
 
 # Create virtual environment (optional but recommended)
 python -m venv venv
@@ -41,18 +45,20 @@ pip install PyQt6
 
 ## Usage
 
-### Running the Application
+### Running the GUI Application
 
+From the `src` directory:
 ```bash
 cd src
 python main.py
 ```
 
 Or from the project root:
-
 ```bash
 python -m src.main
 ```
+
+This launches the graphical user interface where you can browse, search, and manage your bookmarks.
 
 ### First Run
 

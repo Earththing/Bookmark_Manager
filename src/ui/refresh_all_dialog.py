@@ -132,17 +132,19 @@ class RefreshAllWorker(QThread):
         total_skipped = 0
         profiles_processed = 0
 
-        for i, (browser_name, profile_info) in enumerate(profiles):
+        for i, profile in enumerate(profiles):
             if self._cancelled:
                 break
 
             self.progress_updated.emit(i + 1, len(profiles), "Importing")
 
             try:
-                stats = import_service.import_profile(browser_name, profile_info)
-                total_imported += stats.get('bookmarks_added', 0)
-                total_skipped += stats.get('bookmarks_skipped', 0)
-                profiles_processed += 1
+                # Only import profiles that have bookmarks
+                if profile.has_bookmarks_file:
+                    result = import_service.import_profile(profile)
+                    total_imported += result.bookmarks_added
+                    total_skipped += result.bookmarks_skipped
+                    profiles_processed += 1
             except Exception as e:
                 # Continue with other profiles
                 pass
