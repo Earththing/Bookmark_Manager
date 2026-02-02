@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Bookmark Manager - Delete Bookmarks</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1 {
+      color: #333;
+      border-bottom: 2px solid #dc3545;
+      padding-bottom: 10px;
+    }
+    .warning {
+      background-color: #fff3cd;
+      border: 1px solid #ffc107;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .error {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .success {
+      background-color: #d4edda;
+      border: 1px solid #c3e6cb;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .info {
+      background-color: #d1ecf1;
+      border: 1px solid #bee5eb;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    button {
+      background-color: #dc3545;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    button:hover {
+      background-color: #c82333;
+    }
+    button:disabled {
+      background-color: #6c757d;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background-color: #6c757d;
+    }
+    #progress {
+      margin-top: 20px;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background-color: #e9ecef;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background-color: #28a745;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    #results {
+      margin-top: 20px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+      background-color: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+    }
+    .result-item {
+      padding: 3px 0;
+    }
+    .result-success { color: #155724; }
+    .result-error { color: #721c24; }
+    #bookmark-list {
+      max-height: 300px;
+      overflow-y: auto;
+      background-color: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      font-size: 13px;
+    }
+    .bookmark-item {
+      padding: 5px 0;
+      border-bottom: 1px solid #dee2e6;
+    }
+    .bookmark-item:last-child {
+      border-bottom: none;
+    }
+    .bookmark-title {
+      font-weight: bold;
+    }
+    .bookmark-url {
+      color: #666;
+      font-size: 11px;
+      word-break: break-all;
+    }
+    #status {
+      font-size: 14px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Bookmark Manager - Delete Bookmarks</h1>
+
+  <div id="extension-check" class="info">
+    Checking for Bookmark Manager Helper extension...
+  </div>
+
+  <div id="content" style="display: none;">
+    <div class="warning">
+      <strong>Warning:</strong> This will permanently delete the following bookmarks from your browser.
+      The deletions will sync to your account if sync is enabled.
+    </div>
+
+    <h3>Bookmarks to Delete (<span id="count">0</span>):</h3>
+    <div id="bookmark-list">
+      Loading...
+    </div>
+
+    <div>
+      <button id="deleteBtn">Delete All Bookmarks</button>
+      <button id="cancelBtn" class="secondary">Cancel</button>
+    </div>
+
+    <div id="progress" style="display: none;">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div id="status">Deleting...</div>
+    </div>
+
+    <div id="results" style="display: none;"></div>
+  </div>
+
+  <script>
+    // The bookmark IDs to delete will be injected here by the desktop app
+    // FORMAT: const BOOKMARKS_TO_DELETE = [{id: "123", title: "...", url: "..."}, ...];
+    // INJECT_BOOKMARKS_HERE
+
+    // Check if bookmarks data is available
+    if (typeof BOOKMARKS_TO_DELETE === 'undefined') {
+      document.getElementById('extension-check').innerHTML = `
+        <div class="error">
+          <strong>Error:</strong> No bookmarks data found.
+          Please use the Bookmark Manager app to generate this page.
+        </div>
+      `;
+    } else {
+      initializePage();
+    }
+
+    function initializePage() {
+      const extensionCheck = document.getElementById('extension-check');
+      const content = document.getElementById('content');
+      const bookmarkList = document.getElementById('bookmark-list');
+      const countSpan = document.getElementById('count');
+      const deleteBtn = document.getElementById('deleteBtn');
+      const cancelBtn = document.getElementById('cancelBtn');
+      const progressDiv = document.getElementById('progress');
+      const progressFill = document.getElementById('progress-fill');
+      const statusDiv = document.getElementById('status');
+      const resultsDiv = document.getElementById('results');
+
+      // Display bookmarks
+      countSpan.textContent = BOOKMARKS_TO_DELETE.length;
+      bookmarkList.innerHTML = BOOKMARKS_TO_DELETE.map(b => `
+        <div class="bookmark-item">
+          <div class="bookmark-title">${escapeHtml(b.title || '(no title)')}</div>
+          <div class="bookmark-url">${escapeHtml(b.url)}</div>
+          <div style="color: #999; font-size: 10px;">ID: ${b.id}</div>
+        </div>
+      `).join('');
+
+      // Check if we have chrome.bookmarks API
+      if (typeof chrome !== 'undefined' && chrome.bookmarks) {
+        extensionCheck.className = 'success';
+        extensionCheck.innerHTML = '<strong>Ready!</strong> Chrome Bookmarks API is available.';
+        content.style.display = 'block';
+      } else {
+        extensionCheck.className = 'error';
+        extensionCheck.innerHTML = `
+          <strong>Error:</strong> Chrome Bookmarks API is not available.<br><br>
+          Please make sure you:
+          <ol>
+            <li>Have installed the "Bookmark Manager Helper" extension</li>
+            <li>Are viewing this page in Chrome or Edge</li>
+          </ol>
+        `;
+        return;
+      }
+
+      // Delete button handler
+      deleteBtn.addEventListener('click', async () => {
+        if (!confirm(`Are you sure you want to delete ${BOOKMARKS_TO_DELETE.length} bookmarks?`)) {
+          return;
+        }
+
+        deleteBtn.disabled = true;
+        cancelBtn.disabled = true;
+        progressDiv.style.display = 'block';
+        resultsDiv.style.display = 'block';
+        resultsDiv.innerHTML = '';
+
+        let successCount = 0;
+        let errorCount = 0;
+        const total = BOOKMARKS_TO_DELETE.length;
+
+        for (let i = 0; i < BOOKMARKS_TO_DELETE.length; i++) {
+          const bookmark = BOOKMARKS_TO_DELETE[i];
+          const progress = ((i + 1) / total * 100).toFixed(0);
+          progressFill.style.width = progress + '%';
+          statusDiv.textContent = `Deleting ${i + 1} of ${total}...`;
+
+          try {
+            await chrome.bookmarks.remove(String(bookmark.id));
+            successCount++;
+            resultsDiv.innerHTML += `<div class="result-item result-success">✓ Deleted: ${escapeHtml(bookmark.title || bookmark.url)}</div>`;
+          } catch (error) {
+            errorCount++;
+            resultsDiv.innerHTML += `<div class="result-item result-error">✗ Failed: ${escapeHtml(bookmark.title || bookmark.url)} - ${error.message}</div>`;
+          }
+
+          // Scroll results to bottom
+          resultsDiv.scrollTop = resultsDiv.scrollHeight;
+        }
+
+        progressFill.style.width = '100%';
+        statusDiv.innerHTML = `
+          <strong>Complete!</strong>
+          Deleted: ${successCount} | Failed: ${errorCount}
+          <br><br>
+          <span style="color: #155724;">
+            Bookmarks have been deleted and will sync to your account.
+            You can close this tab now.
+          </span>
+        `;
+
+        deleteBtn.textContent = 'Done';
+      });
+
+      // Cancel button handler
+      cancelBtn.addEventListener('click', () => {
+        if (confirm('Cancel deletion and close this page?')) {
+          window.close();
+        }
+      });
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

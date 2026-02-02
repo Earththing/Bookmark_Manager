@@ -135,6 +135,9 @@ class ProfileDetector:
     def _get_profile_name(self, profile_path: Path) -> Optional[str]:
         """Get the user-friendly profile name from Preferences file.
 
+        Prioritizes account info (email/full_name) over generic profile names
+        like "Person 1" or "Profile 1".
+
         Args:
             profile_path: Path to the profile directory
 
@@ -150,12 +153,30 @@ class ProfileDetector:
             with open(preferences_file, "r", encoding="utf-8") as f:
                 prefs = json.load(f)
 
-            # The profile name is typically in profile.name
+            # First, try to get account info (more meaningful than generic names)
+            account_info = prefs.get("account_info", [])
+            if account_info and len(account_info) > 0:
+                account = account_info[0]
+                # Prefer email as it's unique and identifiable
+                email = account.get("email")
+                if email:
+                    return email
+                # Fall back to full_name
+                full_name = account.get("full_name")
+                if full_name:
+                    return full_name
+
+            # Fall back to profile.name, but skip generic names
             profile_info = prefs.get("profile", {})
             name = profile_info.get("name")
 
+            # Check if name is generic (Person 1, Profile 1, etc.)
             if name:
-                return name
+                # Skip generic names - we'll use profile_id instead
+                generic_patterns = ["Person ", "Profile ", "User "]
+                is_generic = any(name.startswith(p) for p in generic_patterns)
+                if not is_generic:
+                    return name
 
         except (json.JSONDecodeError, IOError, KeyError):
             pass

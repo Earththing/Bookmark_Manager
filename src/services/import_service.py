@@ -90,6 +90,11 @@ class ImportService:
                 profile_path=str(detected_profile.profile_path),
             )
             db_profile.save(self.db)
+        else:
+            # Update display name if it changed (e.g., user signed into account)
+            if detected_profile.profile_name and db_profile.profile_display_name != detected_profile.profile_name:
+                db_profile.profile_display_name = detected_profile.profile_name
+                db_profile.save(self.db)
 
         result = ImportResult(profile=db_profile)
 

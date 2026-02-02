@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Bookmark Manager Helper",
+  "version": "1.0",
+  "description": "Helper extension for Bookmark Manager to delete bookmarks with sync support",
+  "permissions": [
+    "bookmarks"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Bookmark Manager Helper"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": ["http://localhost/*", "http://127.0.0.1/*"]
+  }
+}

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 450px;
+      padding: 15px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+    }
+    h2 {
+      margin-top: 0;
+      color: #333;
+      border-bottom: 2px solid #dc3545;
+      padding-bottom: 8px;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+    }
+    .status.ready {
+      background-color: #d4edda;
+      color: #155724;
+    }
+    .warning {
+      background-color: #fff3cd;
+      color: #856404;
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      font-size: 12px;
+    }
+    .instructions {
+      background-color: #f8f9fa;
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      margin-bottom: 15px;
+    }
+    .instructions h3 {
+      margin-top: 0;
+      font-size: 14px;
+    }
+    .instructions ol {
+      margin-bottom: 0;
+      padding-left: 20px;
+    }
+    textarea {
+      width: 100%;
+      height: 150px;
+      margin: 10px 0;
+      font-family: monospace;
+      font-size: 11px;
+      box-sizing: border-box;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .button-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    button {
+      background-color: #dc3545;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover {
+      background-color: #c82333;
+    }
+    button:disabled {
+      background-color: #aaa;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background-color: #6c757d;
+    }
+    button.secondary:hover {
+      background-color: #5a6268;
+    }
+    button.load-file {
+      background-color: #007bff;
+    }
+    button.load-file:hover {
+      background-color: #0069d9;
+    }
+    #results {
+      margin-top: 15px;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      background-color: #f8f9fa;
+      padding: 10px;
+      border-radius: 4px;
+      display: none;
+    }
+    #results.show {
+      display: block;
+    }
+    .success { color: #155724; }
+    .error { color: #721c24; }
+    #progress {
+      margin: 10px 0;
+      display: none;
+    }
+    #progress.show {
+      display: block;
+    }
+    .progress-bar {
+      height: 8px;
+      background-color: #e9ecef;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background-color: #28a745;
+      width: 0%;
+      transition: width 0.2s ease;
+    }
+    #count-display {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 5px;
+    }
+    #file-input {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h2>Bookmark Manager Helper</h2>
+
+  <div class="status ready">
+    Extension is ready. Deletions will sync properly.
+  </div>
+
+  <div class="warning">
+    <strong>Important:</strong> This extension uses the official Chrome Bookmarks API
+    to delete bookmarks. Unlike file-based deletion, these changes will
+    properly sync to your Google/Microsoft account.
+  </div>
+
+  <div class="instructions">
+    <h3>How to use:</h3>
+    <ol>
+      <li>In Bookmark Manager, click "Delete from Browsers"</li>
+      <li>Select bookmarks and click "Copy IDs for Extension"</li>
+      <li>Paste the IDs below (or load from file)</li>
+      <li>Click "Delete Bookmarks" button</li>
+    </ol>
+  </div>
+
+  <input type="file" id="file-input" accept=".txt,.json">
+
+  <div class="button-row">
+    <button id="loadFileBtn" class="load-file">Load IDs from File</button>
+    <button id="pasteBtn" class="secondary">Paste from Clipboard</button>
+  </div>
+
+  <div id="count-display">0 bookmark IDs loaded</div>
+  <textarea id="bookmarkIds" placeholder="Paste bookmark IDs here (one per line) or load from file...
+
+Example:
+123
+456
+789"></textarea>
+
+  <div class="button-row">
+    <button id="deleteBtn" disabled>Delete Bookmarks</button>
+    <button id="clearBtn" class="secondary">Clear</button>
+  </div>
+
+  <div id="progress">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+    <div id="progress-text" style="font-size: 12px; margin-top: 5px;"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

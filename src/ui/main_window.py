@@ -30,6 +30,7 @@ from .import_dialog import ImportDialog
 from .dead_link_dialog import DeadLinkDialog
 from .duplicate_dialog import DuplicateDialog, normalize_url
 from .refresh_all_dialog import RefreshAllDialog
+from .delete_bookmarks_dialog import DeleteBookmarksDialog
 
 
 class MainWindow(QMainWindow):
@@ -158,6 +159,13 @@ class MainWindow(QMainWindow):
         dead_link_action.setShortcut("Ctrl+D")
         dead_link_action.triggered.connect(self.show_dead_link_dialog)
         file_menu.addAction(dead_link_action)
+
+        file_menu.addSeparator()
+
+        delete_bookmarks_action = QAction("Delete from &Browsers...", self)
+        delete_bookmarks_action.setShortcut("Ctrl+Shift+D")
+        delete_bookmarks_action.triggered.connect(self.show_delete_bookmarks_dialog)
+        file_menu.addAction(delete_bookmarks_action)
 
         file_menu.addSeparator()
 
@@ -537,6 +545,14 @@ class MainWindow(QMainWindow):
         dialog.database_reset.connect(self.on_database_reset)
         dialog.exec()
         # Refresh everything after
+        self.load_status_data()
+        self.load_data()
+
+    def show_delete_bookmarks_dialog(self):
+        """Show the delete bookmarks dialog."""
+        dialog = DeleteBookmarksDialog(self)
+        dialog.exec()
+        # Refresh everything after (bookmarks may have been deleted)
         self.load_status_data()
         self.load_data()
 
