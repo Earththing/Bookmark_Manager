@@ -258,7 +258,24 @@ class RestoreBackupDialog(QDialog):
             if reply == QMessageBox.StandardButton.Yes:
                 success, message = BrowserProcessService.close_browser(browser_name)
                 if not success:
-                    QMessageBox.warning(self, "Could Not Close Browser", message)
+                    # Get more details about what's running
+                    import psutil
+                    running_pids = []
+                    for proc in psutil.process_iter(['pid', 'name']):
+                        try:
+                            if proc.info['name'] and 'msedge' in proc.info['name'].lower():
+                                running_pids.append(f"{proc.info['name']} (PID {proc.info['pid']})")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    detail_msg = message
+                    if running_pids:
+                        detail_msg += "\n\nProcesses still running:\n" + "\n".join(running_pids[:5])
+                        if len(running_pids) > 5:
+                            detail_msg += f"\n... and {len(running_pids) - 5} more"
+                        detail_msg += "\n\nTry closing Edge manually or use Task Manager."
+
+                    QMessageBox.warning(self, "Could Not Close Browser", detail_msg)
                     return
             else:
                 return

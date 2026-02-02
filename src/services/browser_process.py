@@ -19,10 +19,11 @@ class BrowserProcess:
 class BrowserProcessService:
     """Service to detect and manage browser processes."""
 
-    # Map browser names to their process names
+    # Map browser names to their main process names
+    # Note: Only include the main browser process - not WebView2 which is used by other apps
     BROWSER_PROCESSES = {
-        "Chrome": "chrome.exe",
-        "Edge": "msedge.exe",
+        "Chrome": ["chrome.exe"],
+        "Edge": ["msedge.exe"],  # Only main Edge process, not msedgewebview2.exe
     }
 
     @classmethod
@@ -34,14 +35,20 @@ class BrowserProcessService:
         """
         running = []
 
-        for browser_name, process_name in cls.BROWSER_PROCESSES.items():
-            pids = cls._get_process_pids(process_name)
-            if pids:
+        for browser_name, process_names in cls.BROWSER_PROCESSES.items():
+            all_pids = []
+            main_process = process_names[0]  # First in list is the main process
+
+            for process_name in process_names:
+                pids = cls._get_process_pids(process_name)
+                all_pids.extend(pids)
+
+            if all_pids:
                 # Just report the main process (lowest PID is usually the main one)
                 running.append(BrowserProcess(
                     browser_name=browser_name,
-                    process_name=process_name,
-                    pid=min(pids),
+                    process_name=main_process,
+                    pid=min(all_pids),
                     is_running=True
                 ))
 
@@ -57,11 +64,15 @@ class BrowserProcessService:
         Returns:
             True if the browser is running
         """
-        process_name = cls.BROWSER_PROCESSES.get(browser_name)
-        if not process_name:
+        process_names = cls.BROWSER_PROCESSES.get(browser_name)
+        if not process_names:
             return False
 
-        return len(cls._get_process_pids(process_name)) > 0
+        # Check all possible process names for this browser
+        for process_name in process_names:
+            if cls._get_process_pids(process_name):
+                return True
+        return False
 
     @classmethod
     def _get_process_pids(cls, process_name: str) -> List[int]:
@@ -94,23 +105,25 @@ class BrowserProcessService:
         Returns:
             Tuple of (success, message)
         """
-        process_name = cls.BROWSER_PROCESSES.get(browser_name)
-        if not process_name:
+        process_names = cls.BROWSER_PROCESSES.get(browser_name)
+        if not process_names:
             return False, f"Unknown browser: {browser_name}"
 
-        pids = cls._get_process_pids(process_name)
-        if not pids:
+        # Check if already not running
+        if not cls.is_browser_running(browser_name):
             return True, f"{browser_name} is not running"
 
         try:
             if force:
-                # Force kill all processes
-                for pid in pids:
-                    try:
-                        proc = psutil.Process(pid)
-                        proc.kill()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
+                # Force kill all processes for all process names
+                for process_name in process_names:
+                    pids = cls._get_process_pids(process_name)
+                    for pid in pids:
+                        try:
+                            proc = psutil.Process(pid)
+                            proc.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
 
                 # Wait briefly for processes to terminate
                 time.sleep(1)
@@ -121,24 +134,26 @@ class BrowserProcessService:
                 else:
                     return False, f"Failed to force close {browser_name}"
             else:
-                # Try graceful close using taskkill
-                result = subprocess.run(
-                    ['taskkill', '/IM', process_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout
-                )
+                # Try graceful close using taskkill for each process name
+                main_process = process_names[0]
+                try:
+                    subprocess.run(
+                        ['taskkill', '/IM', main_process],
+                        capture_output=True,
+                        text=True,
+                        timeout=5  # Short timeout for taskkill itself
+                    )
+                except subprocess.TimeoutExpired:
+                    pass  # Continue to wait anyway
 
                 # Wait for browser to close
                 for _ in range(timeout):
-                    time.sleep(1)
                     if not cls.is_browser_running(browser_name):
                         return True, f"{browser_name} closed successfully"
+                    time.sleep(1)
 
                 return False, f"{browser_name} did not close within {timeout} seconds"
 
-        except subprocess.TimeoutExpired:
-            return False, f"Timeout waiting for {browser_name} to close"
         except Exception as e:
             return False, f"Error closing {browser_name}: {str(e)}"
 

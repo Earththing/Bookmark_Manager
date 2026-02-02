@@ -308,7 +308,7 @@ class DeleteBookmarksDialog(QDialog):
             "background-color: #fff3cd; border: 1px solid #ffc107; "
             "border-radius: 4px; padding: 8px;"
         )
-        warning_frame.setFixedHeight(50)  # Fixed height!
+        warning_frame.setFixedHeight(70)  # Fixed height - enough to read the warning
         warning_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         warning_layout = QHBoxLayout(warning_frame)
         warning_label = QLabel(
