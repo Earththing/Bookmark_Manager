@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QProgressDialog, QCheckBox, QHeaderView, QFrame,
     QSplitter, QTextEdit, QComboBox, QRadioButton, QButtonGroup, QMenu,
     QLineEdit, QToolButton, QWidgetAction, QListWidget, QListWidgetItem,
-    QAbstractItemView, QApplication
+    QAbstractItemView, QApplication, QScrollArea, QSizePolicy
 )
 from PyQt6.QtGui import QColor, QBrush, QFont, QAction
 from PyQt6.QtCore import QTimer
@@ -83,15 +83,17 @@ def parse_url_components(url: str) -> Tuple[str, str, str]:
         return ("", "", "")
 
 
-class MultiSelectFilterWidget(QWidget):
-    """A filter widget with search box and multi-select list."""
+class CheckboxFilterWidget(QWidget):
+    """A filter widget with checkboxes for multi-select and search box."""
+
+    filterChanged = pyqtSignal()
 
     def __init__(self, column_name: str, parent=None):
         super().__init__(parent)
         self.column_name = column_name
         self.all_values: List[str] = []
-        self.selected_values: Set[str] = set()
-        self._on_filter_changed = None
+        self.checkboxes: Dict[str, QCheckBox] = {}
+        self.search_text = ""
 
         self.setup_ui()
 
@@ -101,7 +103,7 @@ class MultiSelectFilterWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        # Header with column name and clear button
+        # Header with column name and buttons
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -110,9 +112,18 @@ class MultiSelectFilterWidget(QWidget):
 
         header_layout.addStretch()
 
+        # Select All button
+        self.select_all_btn = QToolButton()
+        self.select_all_btn.setText("All")
+        self.select_all_btn.setToolTip("Select all visible items")
+        self.select_all_btn.setFixedSize(30, 20)
+        self.select_all_btn.clicked.connect(self.select_all)
+        header_layout.addWidget(self.select_all_btn)
+
+        # Clear button
         self.clear_btn = QToolButton()
         self.clear_btn.setText("×")
-        self.clear_btn.setToolTip("Clear filter")
+        self.clear_btn.setToolTip("Clear filter (show all)")
         self.clear_btn.setFixedSize(20, 20)
         self.clear_btn.clicked.connect(self.clear_filter)
         header_layout.addWidget(self.clear_btn)
@@ -121,93 +132,113 @@ class MultiSelectFilterWidget(QWidget):
 
         # Search box
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Type to search...")
-        self.search_box.textChanged.connect(self._filter_list)
+        self.search_box.setPlaceholderText("Type to filter...")
+        self.search_box.textChanged.connect(self._on_search_changed)
         self.search_box.setMaximumHeight(24)
         layout.addWidget(self.search_box)
 
-        # Multi-select list
-        self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self.list_widget.setMaximumHeight(100)
-        self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.list_widget)
+        # Scrollable container for checkboxes
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMaximumHeight(120)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        # Status label showing selection count
+        self.checkbox_container = QWidget()
+        self.checkbox_layout = QVBoxLayout(self.checkbox_container)
+        self.checkbox_layout.setContentsMargins(2, 2, 2, 2)
+        self.checkbox_layout.setSpacing(1)
+
+        scroll_area.setWidget(self.checkbox_container)
+        layout.addWidget(scroll_area)
+
+        # Status label
         self.status_label = QLabel("All")
         self.status_label.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(self.status_label)
 
     def set_values(self, values: List[str]):
         """Set the available values for filtering."""
+        # Remember which values were checked
+        previously_checked = {v for v, cb in self.checkboxes.items() if cb.isChecked()}
+
+        # Clear existing checkboxes
+        for cb in self.checkboxes.values():
+            cb.deleteLater()
+        self.checkboxes.clear()
+
         self.all_values = sorted(set(values))
-        self._populate_list()
 
-    def _populate_list(self, filter_text: str = ""):
-        """Populate the list widget with values, optionally filtered."""
-        self.list_widget.blockSignals(True)
-        self.list_widget.clear()
-
-        filter_lower = filter_text.lower()
+        # Create checkboxes
         for value in self.all_values:
-            if filter_lower and filter_lower not in value.lower():
-                continue
+            cb = QCheckBox(value[:35] + "..." if len(value) > 35 else value)
+            cb.setToolTip(value)  # Full value in tooltip
+            cb.setChecked(value in previously_checked)
+            cb.stateChanged.connect(self._on_checkbox_changed)
+            self.checkboxes[value] = cb
+            self.checkbox_layout.addWidget(cb)
 
-            item = QListWidgetItem(value[:40] if len(value) > 40 else value)
-            item.setData(Qt.ItemDataRole.UserRole, value)
-            item.setToolTip(value)
+        # Apply search filter if active
+        if self.search_text:
+            self._apply_search_filter()
 
-            # Restore selection state
-            if value in self.selected_values:
-                item.setSelected(True)
+        self._update_status()
 
-            self.list_widget.addItem(item)
+    def _on_search_changed(self, text: str):
+        """Handle search text change."""
+        self.search_text = text.lower()
+        self._apply_search_filter()
 
-        self.list_widget.blockSignals(False)
+    def _apply_search_filter(self):
+        """Show/hide checkboxes based on search text."""
+        for value, cb in self.checkboxes.items():
+            if self.search_text:
+                cb.setVisible(self.search_text in value.lower())
+            else:
+                cb.setVisible(True)
 
-    def _filter_list(self, text: str):
-        """Filter the list based on search text."""
-        self._populate_list(text)
+    def _on_checkbox_changed(self, state: int):
+        """Handle checkbox state change."""
+        self._update_status()
+        self.filterChanged.emit()
 
-    def _on_selection_changed(self):
-        """Handle selection change in the list."""
-        self.selected_values.clear()
-        for item in self.list_widget.selectedItems():
-            value = item.data(Qt.ItemDataRole.UserRole)
-            if value:
-                self.selected_values.add(value)
+    def _update_status(self):
+        """Update the status label."""
+        checked_count = sum(1 for cb in self.checkboxes.values() if cb.isChecked())
+        total = len(self.checkboxes)
 
-        # Update status label
-        if not self.selected_values or len(self.selected_values) == len(self.all_values):
-            self.status_label.setText("All")
+        if checked_count == 0:
+            self.status_label.setText("All (no filter)")
+        elif checked_count == total:
+            self.status_label.setText("All selected")
         else:
-            self.status_label.setText(f"{len(self.selected_values)} of {len(self.all_values)} selected")
-
-        # Notify parent of filter change
-        if self._on_filter_changed:
-            self._on_filter_changed()
+            self.status_label.setText(f"{checked_count} of {total} selected")
 
     def get_selected_values(self) -> Optional[Set[str]]:
-        """Get the selected values, or None if all/none selected (no filter)."""
-        if not self.selected_values or len(self.selected_values) == len(self.all_values):
+        """Get the selected values, or None if none selected (no filter = show all)."""
+        checked = {v for v, cb in self.checkboxes.items() if cb.isChecked()}
+        if not checked:
             return None  # No filter - show all
-        return self.selected_values.copy()
+        return checked
+
+    def select_all(self):
+        """Select all visible checkboxes."""
+        for value, cb in self.checkboxes.items():
+            if cb.isVisible():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+        self._update_status()
+        self.filterChanged.emit()
 
     def clear_filter(self):
-        """Clear all selections (show all)."""
-        self.list_widget.blockSignals(True)
-        self.list_widget.clearSelection()
-        self.list_widget.blockSignals(False)
-        self.selected_values.clear()
+        """Clear all selections (no filter = show all)."""
+        for cb in self.checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
         self.search_box.clear()
-        self.status_label.setText("All")
-
-        if self._on_filter_changed:
-            self._on_filter_changed()
-
-    def set_filter_changed_callback(self, callback):
-        """Set the callback to call when filter changes."""
-        self._on_filter_changed = callback
+        self._update_status()
+        self.filterChanged.emit()
 
 
 @dataclass
@@ -252,11 +283,8 @@ class DeleteBookmarksDialog(QDialog):
         # For duplicates: which bookmark to KEEP in each group (group_id -> bookmark_id)
         self.keep_in_group: Dict[int, int] = {}
 
-        # Column filters - dict of column_index -> set of allowed values (None means no filter)
-        self.column_filters: Dict[int, Optional[Set[str]]] = {}
-
         # Column filter widgets (populated in setup_ui)
-        self.filter_widgets: Dict[int, MultiSelectFilterWidget] = {}
+        self.filter_widgets: Dict[int, CheckboxFilterWidget] = {}
 
         # Column sort state
         self.sort_column: int = 1  # Default sort by title
@@ -266,7 +294,7 @@ class DeleteBookmarksDialog(QDialog):
         self.visible_items: Set[int] = set()
 
         self.setWindowTitle("Delete Bookmarks from Browsers")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1400, 800)
         self.setup_ui()
         self.load_data()
 
@@ -274,15 +302,17 @@ class DeleteBookmarksDialog(QDialog):
         """Set up the dialog UI."""
         layout = QVBoxLayout(self)
 
-        # Warning banner
+        # Warning banner - FIXED HEIGHT, won't stretch
         warning_frame = QFrame()
         warning_frame.setStyleSheet(
             "background-color: #fff3cd; border: 1px solid #ffc107; "
             "border-radius: 4px; padding: 8px;"
         )
+        warning_frame.setFixedHeight(50)  # Fixed height!
+        warning_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         warning_layout = QHBoxLayout(warning_frame)
         warning_label = QLabel(
-            "\u26a0\ufe0f <b>Warning:</b> This will permanently delete selected bookmarks "
+            "⚠️ <b>Warning:</b> This will permanently delete selected bookmarks "
             "from your browsers. Backups are created automatically before changes."
         )
         warning_label.setWordWrap(True)
@@ -292,10 +322,10 @@ class DeleteBookmarksDialog(QDialog):
         # Main content - splitter with filters on left, items in middle, preview on right
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left panel - Filters
-        filter_widget = QWidget()
-        filter_layout = QVBoxLayout(filter_widget)
-        filter_layout.setContentsMargins(0, 0, 0, 0)
+        # Left panel - Category and Browser Filters
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
 
         # Category filter
         category_group = QGroupBox("Categories")
@@ -316,20 +346,19 @@ class DeleteBookmarksDialog(QDialog):
         self.similar_dups_check.stateChanged.connect(self.apply_filters)
         category_layout.addWidget(self.similar_dups_check)
 
-        filter_layout.addWidget(category_group)
+        left_layout.addWidget(category_group)
 
         # Browser filter
         browser_group = QGroupBox("Browsers")
         browser_layout = QVBoxLayout(browser_group)
 
         self.browser_checks: Dict[str, QCheckBox] = {}
-        # Will be populated when data loads
         self.browser_container = QWidget()
         self.browser_container_layout = QVBoxLayout(self.browser_container)
         self.browser_container_layout.setContentsMargins(0, 0, 0, 0)
         browser_layout.addWidget(self.browser_container)
 
-        filter_layout.addWidget(browser_group)
+        left_layout.addWidget(browser_group)
 
         # Profile filter
         profile_group = QGroupBox("Profiles")
@@ -341,9 +370,9 @@ class DeleteBookmarksDialog(QDialog):
         self.profile_container_layout.setContentsMargins(0, 0, 0, 0)
         profile_layout.addWidget(self.profile_container)
 
-        filter_layout.addWidget(profile_group)
+        left_layout.addWidget(profile_group)
 
-        filter_layout.addStretch()
+        left_layout.addStretch()
 
         # Quick actions
         actions_group = QGroupBox("Quick Actions")
@@ -369,91 +398,85 @@ class DeleteBookmarksDialog(QDialog):
         auto_select_btn.clicked.connect(self.auto_select_duplicates)
         actions_layout.addWidget(auto_select_btn)
 
-        filter_layout.addWidget(actions_group)
+        left_layout.addWidget(actions_group)
 
-        main_splitter.addWidget(filter_widget)
+        main_splitter.addWidget(left_panel)
 
-        # Middle panel - Tree view of bookmarks
+        # Middle panel - Column Filters and Tree view
         middle_widget = QWidget()
         middle_layout = QVBoxLayout(middle_widget)
         middle_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Filter bar for column filtering - two rows of multi-select filters
-        filter_container = QVBoxLayout()
-        filter_container.setSpacing(4)
+        # Filter bar with checkbox filters - horizontal layout
+        filter_frame = QFrame()
+        filter_frame.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;")
+        filter_frame_layout = QVBoxLayout(filter_frame)
+        filter_frame_layout.setContentsMargins(8, 8, 8, 8)
 
-        # Row 1: Title, Domain, TLD filters
+        # Row 1: Title, Domain, TLD, Subdomain
         filter_row1 = QHBoxLayout()
-        filter_row1.setSpacing(8)
+        filter_row1.setSpacing(12)
 
-        # Title filter (uses column index 1)
-        title_filter = MultiSelectFilterWidget("Title")
-        title_filter.setMinimumWidth(120)
-        title_filter.setMaximumWidth(160)
-        title_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        # Title filter
+        title_filter = CheckboxFilterWidget("Title")
+        title_filter.setMinimumWidth(140)
+        title_filter.setMaximumWidth(180)
+        title_filter.filterChanged.connect(self.apply_filters)
         self.filter_widgets[1] = title_filter
         filter_row1.addWidget(title_filter)
 
-        # Domain filter (uses virtual column index 100 - not an actual tree column)
-        domain_filter = MultiSelectFilterWidget("Domain")
-        domain_filter.setMinimumWidth(120)
-        domain_filter.setMaximumWidth(160)
-        domain_filter.set_filter_changed_callback(self.on_column_filter_changed)
-        self.filter_widgets[100] = domain_filter  # Virtual column for domain
+        # Domain filter
+        domain_filter = CheckboxFilterWidget("Domain")
+        domain_filter.setMinimumWidth(140)
+        domain_filter.setMaximumWidth(180)
+        domain_filter.filterChanged.connect(self.apply_filters)
+        self.filter_widgets[100] = domain_filter
         filter_row1.addWidget(domain_filter)
 
-        # TLD filter (uses virtual column index 101)
-        tld_filter = MultiSelectFilterWidget("TLD")
-        tld_filter.setMinimumWidth(80)
-        tld_filter.setMaximumWidth(100)
-        tld_filter.set_filter_changed_callback(self.on_column_filter_changed)
-        self.filter_widgets[101] = tld_filter  # Virtual column for TLD
+        # TLD filter
+        tld_filter = CheckboxFilterWidget("TLD")
+        tld_filter.setMinimumWidth(100)
+        tld_filter.setMaximumWidth(120)
+        tld_filter.filterChanged.connect(self.apply_filters)
+        self.filter_widgets[101] = tld_filter
         filter_row1.addWidget(tld_filter)
 
-        # Subdomain filter (uses virtual column index 102)
-        subdomain_filter = MultiSelectFilterWidget("Subdomain")
-        subdomain_filter.setMinimumWidth(100)
-        subdomain_filter.setMaximumWidth(130)
-        subdomain_filter.set_filter_changed_callback(self.on_column_filter_changed)
-        self.filter_widgets[102] = subdomain_filter  # Virtual column for subdomain
+        # Subdomain filter
+        subdomain_filter = CheckboxFilterWidget("Subdomain")
+        subdomain_filter.setMinimumWidth(120)
+        subdomain_filter.setMaximumWidth(150)
+        subdomain_filter.filterChanged.connect(self.apply_filters)
+        self.filter_widgets[102] = subdomain_filter
         filter_row1.addWidget(subdomain_filter)
 
         filter_row1.addStretch()
-        filter_container.addLayout(filter_row1)
+        filter_frame_layout.addLayout(filter_row1)
 
-        # Row 2: Folder, Browser/Profile, Dead Link, Duplicate filters
+        # Row 2: Folder, Dead Link, Duplicate
         filter_row2 = QHBoxLayout()
-        filter_row2.setSpacing(8)
+        filter_row2.setSpacing(12)
 
-        # Folder filter (column 2)
-        folder_filter = MultiSelectFilterWidget("Folder")
-        folder_filter.setMinimumWidth(120)
-        folder_filter.setMaximumWidth(160)
-        folder_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        # Folder filter
+        folder_filter = CheckboxFilterWidget("Folder")
+        folder_filter.setMinimumWidth(140)
+        folder_filter.setMaximumWidth(180)
+        folder_filter.filterChanged.connect(self.apply_filters)
         self.filter_widgets[2] = folder_filter
         filter_row2.addWidget(folder_filter)
 
-        # Browser/Profile filter (column 4)
-        browser_filter = MultiSelectFilterWidget("Browser/Profile")
-        browser_filter.setMinimumWidth(130)
-        browser_filter.setMaximumWidth(170)
-        browser_filter.set_filter_changed_callback(self.on_column_filter_changed)
-        self.filter_widgets[4] = browser_filter
-        filter_row2.addWidget(browser_filter)
-
-        # Dead Link filter (column 5)
-        dead_link_filter = MultiSelectFilterWidget("Dead Link")
-        dead_link_filter.setMinimumWidth(110)
-        dead_link_filter.setMaximumWidth(150)
-        dead_link_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        # Dead Link filter
+        dead_link_filter = CheckboxFilterWidget("Dead Link Error")
+        dead_link_filter.setMinimumWidth(140)
+        dead_link_filter.setMaximumWidth(180)
+        dead_link_filter.filterChanged.connect(self.apply_filters)
         self.filter_widgets[5] = dead_link_filter
         filter_row2.addWidget(dead_link_filter)
 
-        # Duplicate filter (column 6)
-        duplicate_filter = MultiSelectFilterWidget("Duplicate")
-        duplicate_filter.setMinimumWidth(100)
-        duplicate_filter.setMaximumWidth(130)
-        duplicate_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        # Duplicate filter
+        duplicate_filter = CheckboxFilterWidget("Duplicate Type")
+        duplicate_filter.setMinimumWidth(120)
+        duplicate_filter.setMaximumWidth(150)
+        duplicate_filter.filterChanged.connect(self.apply_filters)
         self.filter_widgets[6] = duplicate_filter
         filter_row2.addWidget(duplicate_filter)
 
@@ -463,18 +486,17 @@ class DeleteBookmarksDialog(QDialog):
         clear_filters_btn.clicked.connect(self.clear_all_filters)
         filter_row2.addWidget(clear_filters_btn)
 
-        filter_container.addLayout(filter_row2)
+        filter_frame_layout.addLayout(filter_row2)
 
-        middle_layout.addLayout(filter_container)
+        middle_layout.addWidget(filter_frame)
 
-        # Tree widget showing bookmarks grouped by category
+        # Tree widget showing bookmarks - ALL columns interactive for resizing
         self.items_tree = QTreeWidget()
         self.items_tree.setHeaderLabels(["Select", "Title ▲", "Folder", "URL", "Browser/Profile", "Dead Link", "Duplicate"])
         self.items_tree.setColumnCount(7)
-        self.items_tree.setRootIsDecorated(False)  # Flat list for better sorting/filtering
+        self.items_tree.setRootIsDecorated(False)
         self.items_tree.setAlternatingRowColors(True)
-        self.items_tree.setSortingEnabled(False)  # We'll handle sorting manually
-        # Use light blue selection color so checkboxes are still visible
+        self.items_tree.setSortingEnabled(False)
         self.items_tree.setStyleSheet("""
             QTreeWidget::item:selected {
                 background-color: #cce5ff;
@@ -498,21 +520,26 @@ class DeleteBookmarksDialog(QDialog):
         header.setSectionsClickable(True)
         header.sectionClicked.connect(self.on_header_clicked)
 
+        # ALL columns are Interactive for manual resizing
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(0, 70)  # Wider for checkbox - needs more space
+        header.resizeSection(0, 60)  # Checkbox
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(1, 150)  # Title
+        header.resizeSection(1, 180)  # Title
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(2, 120)  # Folder
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # URL
+        header.resizeSection(2, 150)  # Folder
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(3, 350)  # URL - wider by default
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(4, 120)  # Browser/Profile
+        header.resizeSection(4, 140)  # Browser/Profile
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(5, 110)  # Dead Link
+        header.resizeSection(5, 120)  # Dead Link
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
         header.resizeSection(6, 90)  # Duplicate
 
-        middle_layout.addWidget(self.items_tree)
+        # Allow user to resize columns by dragging
+        header.setStretchLastSection(True)
+
+        middle_layout.addWidget(self.items_tree, 1)  # Give it stretch factor
 
         # Count label
         self.count_label = QLabel("0 items")
@@ -520,27 +547,43 @@ class DeleteBookmarksDialog(QDialog):
 
         main_splitter.addWidget(middle_widget)
 
-        # Right panel - Preview
+        # Right panel - Preview as Tree
         preview_widget = QWidget()
         preview_layout = QVBoxLayout(preview_widget)
         preview_layout.setContentsMargins(0, 0, 0, 0)
 
-        preview_group = QGroupBox("Deletion Preview")
+        preview_group = QGroupBox("Selected for Deletion")
         preview_inner = QVBoxLayout(preview_group)
 
-        self.preview_text = QTextEdit()
-        self.preview_text.setReadOnly(True)
-        self.preview_text.setMinimumWidth(220)
-        preview_inner.addWidget(self.preview_text)
+        # Preview tree widget - hierarchical view of selected items
+        self.preview_tree = QTreeWidget()
+        self.preview_tree.setHeaderLabels(["Item", "Details"])
+        self.preview_tree.setColumnCount(2)
+        self.preview_tree.setRootIsDecorated(True)
+        self.preview_tree.setAlternatingRowColors(True)
+        self.preview_tree.setMinimumWidth(280)
+
+        preview_header = self.preview_tree.header()
+        preview_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        preview_header.resizeSection(0, 200)
+        preview_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        preview_inner.addWidget(self.preview_tree)
+
+        # Summary label
+        self.summary_label = QLabel("No items selected")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("padding: 5px; background-color: #f0f0f0; border-radius: 3px;")
+        preview_inner.addWidget(self.summary_label)
 
         preview_layout.addWidget(preview_group)
 
         main_splitter.addWidget(preview_widget)
 
         # Set splitter proportions
-        main_splitter.setSizes([180, 750, 250])
+        main_splitter.setSizes([180, 800, 300])
 
-        layout.addWidget(main_splitter)
+        layout.addWidget(main_splitter, 1)  # Give splitter stretch factor
 
         # Bottom buttons - Row 1: Export for Extension
         export_layout = QHBoxLayout()
@@ -610,7 +653,6 @@ class DeleteBookmarksDialog(QDialog):
         self.all_items.clear()
         self.selected_for_deletion.clear()
         self.keep_in_group.clear()
-        self.column_filters.clear()
         self.visible_items.clear()
 
         # Reset filter widgets
@@ -767,7 +809,6 @@ class DeleteBookmarksDialog(QDialog):
                 )
 
             # Now choose which one to keep - prefer non-dead-links
-            # Find first bookmark that is NOT a dead link
             keep_id = None
             for bookmark_id in valid_ids:
                 item = self.all_items.get(bookmark_id)
@@ -776,23 +817,12 @@ class DeleteBookmarksDialog(QDialog):
                     break
 
             # If all are dead links, don't auto-keep any (let user decide)
-            # Otherwise keep the first non-dead-link
             if keep_id is not None:
                 self.keep_in_group[group_id] = keep_id
-            # If all are dead links, we don't set a keep - user must choose
 
     def _format_dead_link_detail(self, status_code: Optional[int], error_message: Optional[str]) -> str:
-        """Format dead link details into a short, descriptive string.
-
-        Args:
-            status_code: HTTP status code (if available)
-            error_message: Error message (if available)
-
-        Returns:
-            Short description of why the link is dead
-        """
+        """Format dead link details into a short, descriptive string."""
         if status_code:
-            # Common HTTP status codes
             status_descriptions = {
                 400: "400 Bad Request",
                 401: "401 Unauthorized",
@@ -816,10 +846,8 @@ class DeleteBookmarksDialog(QDialog):
             else:
                 return f"HTTP {status_code}"
 
-        # No status code, use error message
         if error_message:
             msg = error_message.lower()
-            # Shorten common error messages
             if "timeout" in msg or "timed out" in msg:
                 return "Connection Timeout"
             elif "connection refused" in msg:
@@ -835,7 +863,6 @@ class DeleteBookmarksDialog(QDialog):
             elif "connection error" in msg or "connect error" in msg:
                 return "Connection Error"
             else:
-                # Truncate long messages
                 if len(error_message) > 30:
                     return error_message[:27] + "..."
                 return error_message
@@ -877,10 +904,9 @@ class DeleteBookmarksDialog(QDialog):
             self.profile_container_layout.addWidget(check)
 
     def on_browser_check_changed(self, browser_name: str, state: int):
-        """Handle browser checkbox change - update related profile checkboxes."""
+        """Handle browser checkbox change."""
         is_checked = state == Qt.CheckState.Checked.value
 
-        # Update all profiles for this browser
         for profile_key, check in self.profile_checks.items():
             if profile_key.startswith(f"{browser_name}/"):
                 check.blockSignals(True)
@@ -890,21 +916,17 @@ class DeleteBookmarksDialog(QDialog):
         self.apply_filters()
 
     def on_profile_check_changed(self, profile_key: str, state: int):
-        """Handle profile checkbox change - update related browser checkbox if needed."""
+        """Handle profile checkbox change."""
         is_checked = state == Qt.CheckState.Checked.value
-
-        # Extract browser name from profile key (e.g., "Chrome/Profile 1" -> "Chrome")
         browser_name = profile_key.split("/")[0]
 
         if is_checked:
-            # If a profile is checked, make sure its browser is also checked
             browser_check = self.browser_checks.get(browser_name)
             if browser_check and not browser_check.isChecked():
                 browser_check.blockSignals(True)
                 browser_check.setChecked(True)
                 browser_check.blockSignals(False)
         else:
-            # If all profiles for a browser are unchecked, uncheck the browser too
             all_unchecked = True
             for pk, check in self.profile_checks.items():
                 if pk.startswith(f"{browser_name}/") and check.isChecked():
@@ -921,12 +943,12 @@ class DeleteBookmarksDialog(QDialog):
         self.apply_filters()
 
     def apply_filters(self):
-        """Apply filters and rebuild the tree as a flat, sortable/filterable list."""
+        """Apply filters and rebuild the tree."""
         self.items_tree.blockSignals(True)
         self.items_tree.clear()
         self.visible_items.clear()
 
-        # Get active category filters (left panel)
+        # Get active category filters
         show_dead = self.dead_links_check.isChecked()
         show_exact = self.exact_dups_check.isChecked()
         show_similar = self.similar_dups_check.isChecked()
@@ -934,11 +956,10 @@ class DeleteBookmarksDialog(QDialog):
         active_browsers = {name for name, check in self.browser_checks.items() if check.isChecked()}
         active_profiles = {name for name, check in self.profile_checks.items() if check.isChecked()}
 
-        # Collect all items that pass the category filters
+        # Collect items that pass filters
         filtered_items: List[DeletionItem] = []
 
         for item in self.all_items.values():
-            # Check browser/profile filter (left panel)
             profile_key = f"{item.browser_name}/{item.profile_name}"
             if item.browser_name not in active_browsers:
                 continue
@@ -969,7 +990,7 @@ class DeleteBookmarksDialog(QDialog):
         # Update filter widgets with available values
         self._update_filter_widgets(filtered_items)
 
-        # Add items to tree as flat list
+        # Add items to tree
         for item in filtered_items:
             is_duplicate = "duplicate" in item.reason
             is_kept = item.group_id is not None and self.keep_in_group.get(item.group_id) == item.bookmark_id
@@ -990,10 +1011,7 @@ class DeleteBookmarksDialog(QDialog):
 
             value = self._get_item_column_value(item, col_idx)
 
-            # Special handling for empty values - don't filter out if column shows nothing
-            # but user selected specific values (they want to see items with those values)
             if not value:
-                # If the filter has selections and value is empty, item doesn't match
                 return False
 
             if value not in allowed_values:
@@ -1001,19 +1019,7 @@ class DeleteBookmarksDialog(QDialog):
         return True
 
     def _get_item_column_value(self, item: DeletionItem, col_idx: int) -> str:
-        """Get the display value for a column from a DeletionItem.
-
-        Column indices:
-            1 = Title
-            2 = Folder
-            3 = URL
-            4 = Browser/Profile
-            5 = Dead Link
-            6 = Duplicate
-            100 = Domain (virtual)
-            101 = TLD (virtual)
-            102 = Subdomain (virtual)
-        """
+        """Get the display value for a column from a DeletionItem."""
         if col_idx == 1:  # Title
             return item.title
         elif col_idx == 2:  # Folder
@@ -1022,21 +1028,21 @@ class DeleteBookmarksDialog(QDialog):
             return item.url
         elif col_idx == 4:  # Browser/Profile
             return f"{item.browser_name}/{item.profile_name}"
-        elif col_idx == 5:  # Dead Link column
+        elif col_idx == 5:  # Dead Link
             if "dead_link" in item.reason:
                 return item.dead_link_detail or "Dead"
-            return ""  # Not a dead link
-        elif col_idx == 6:  # Duplicate column
+            return ""
+        elif col_idx == 6:  # Duplicate
             if "exact_duplicate" in item.reason:
                 return "Exact"
             elif "similar_duplicate" in item.reason:
                 return "Similar"
-            return ""  # Not a duplicate
-        elif col_idx == 100:  # Domain (virtual column)
+            return ""
+        elif col_idx == 100:  # Domain
             return item.url_domain or ""
-        elif col_idx == 101:  # TLD (virtual column)
+        elif col_idx == 101:  # TLD
             return item.url_tld or ""
-        elif col_idx == 102:  # Subdomain (virtual column)
+        elif col_idx == 102:  # Subdomain
             return item.url_subdomain or ""
         return ""
 
@@ -1053,44 +1059,35 @@ class DeleteBookmarksDialog(QDialog):
 
     def _update_filter_widgets(self, items: List[DeletionItem]):
         """Update filter widgets with values from current items."""
-        # Collect unique values for each filterable column
         column_values: Dict[int, Set[str]] = {col: set() for col in self.filter_widgets.keys()}
 
-        for item in self.all_items.values():  # Use all items, not just filtered
+        for item in self.all_items.values():
             for col_idx in column_values.keys():
                 value = self._get_item_column_value(item, col_idx)
-                if value:  # Only add non-empty values
+                if value:
                     column_values[col_idx].add(value)
 
-        # Update filter widgets
         for col_idx, filter_widget in self.filter_widgets.items():
             values = list(column_values.get(col_idx, []))
             filter_widget.set_values(values)
 
-    def on_column_filter_changed(self):
-        """Handle column filter widget change."""
-        self.apply_filters()
-
     def clear_all_filters(self):
         """Clear all column filters."""
-        self.column_filters.clear()
         for filter_widget in self.filter_widgets.values():
             filter_widget.clear_filter()
         self.apply_filters()
 
     def on_header_clicked(self, col_idx: int):
         """Handle header click for sorting."""
-        if col_idx == 0:  # Don't sort by checkbox column
+        if col_idx == 0:
             return
 
-        # Toggle sort direction if same column, otherwise set ascending
         if self.sort_column == col_idx:
             self.sort_ascending = not self.sort_ascending
         else:
             self.sort_column = col_idx
             self.sort_ascending = True
 
-        # Update header labels to show sort indicator
         headers = ["Select", "Title", "Folder", "URL", "Browser/Profile", "Dead Link", "Duplicate"]
         for i, header in enumerate(headers):
             if i == col_idx:
@@ -1105,80 +1102,69 @@ class DeleteBookmarksDialog(QDialog):
         tree_item = QTreeWidgetItem()
         tree_item.setFlags(tree_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
 
-        # Check state
         if item.bookmark_id in self.selected_for_deletion:
             tree_item.setCheckState(0, Qt.CheckState.Checked)
         else:
             tree_item.setCheckState(0, Qt.CheckState.Unchecked)
 
-        # Column 1: Title
+        # Title
         tree_item.setText(1, item.title[:60])
         tree_item.setToolTip(1, item.title)
 
-        # Column 2: Folder path
+        # Folder
         folder_display = item.folder_path or "Bookmarks Bar"
         tree_item.setText(2, folder_display)
-        tree_item.setToolTip(2, folder_display)  # Full path in tooltip
+        tree_item.setToolTip(2, folder_display)
 
-        # Column 3: URL
+        # URL
         tree_item.setText(3, item.url[:80])
-        tree_item.setToolTip(3, item.url)  # Full URL in tooltip
+        tree_item.setToolTip(3, item.url)
 
-        # Column 4: Browser/Profile
+        # Browser/Profile
         tree_item.setText(4, f"{item.browser_name}/{item.profile_name}")
 
-        # Column 5: Dead Link status
+        # Dead Link
         if "dead_link" in item.reason:
             dead_link_text = item.dead_link_detail or "Dead"
             tree_item.setText(5, dead_link_text)
             tree_item.setToolTip(5, dead_link_text)
-            # Color-code by error type
             if item.dead_link_detail:
                 if "404" in item.dead_link_detail:
-                    tree_item.setForeground(5, QBrush(QColor(220, 53, 69)))  # Red for 404
+                    tree_item.setForeground(5, QBrush(QColor(220, 53, 69)))
                 elif "Timeout" in item.dead_link_detail:
-                    tree_item.setForeground(5, QBrush(QColor(255, 153, 0)))  # Orange for timeout
+                    tree_item.setForeground(5, QBrush(QColor(255, 153, 0)))
                 elif "DNS" in item.dead_link_detail or "Lookup" in item.dead_link_detail:
-                    tree_item.setForeground(5, QBrush(QColor(128, 0, 128)))  # Purple for DNS
+                    tree_item.setForeground(5, QBrush(QColor(128, 0, 128)))
 
-        # Column 6: Duplicate status
+        # Duplicate
         if is_duplicate:
             if is_kept:
                 tree_item.setText(6, "✓ KEEP")
                 tree_item.setBackground(6, QBrush(QColor(200, 255, 200)))
-                # Don't allow checking the "keep" item
                 tree_item.setFlags(tree_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 tree_item.setCheckState(0, Qt.CheckState.Unchecked)
             else:
-                # Show duplicate type
                 if "exact_duplicate" in item.reason:
                     tree_item.setText(6, "Exact")
-                    tree_item.setForeground(6, QBrush(QColor(220, 53, 69)))  # Red for exact
+                    tree_item.setForeground(6, QBrush(QColor(220, 53, 69)))
                 elif "similar_duplicate" in item.reason:
                     tree_item.setText(6, "Similar")
-                    tree_item.setForeground(6, QBrush(QColor(255, 153, 0)))  # Orange for similar
+                    tree_item.setForeground(6, QBrush(QColor(255, 153, 0)))
 
-        # Store data
         tree_item.setData(0, Qt.ItemDataRole.UserRole, item.bookmark_id)
         tree_item.setData(0, Qt.ItemDataRole.UserRole + 1, item.group_id)
 
         return tree_item
 
     def on_item_clicked(self, tree_item: QTreeWidgetItem, column: int):
-        """Handle item clicked - toggle checkbox when clicking anywhere on the row."""
+        """Handle item clicked."""
         bookmark_id = tree_item.data(0, Qt.ItemDataRole.UserRole)
-        group_id = tree_item.data(0, Qt.ItemDataRole.UserRole + 1)
-
-        # Only handle clicks on actual bookmark items (not category headers or group headers)
         if bookmark_id is None:
             return
 
-        # Check if this item is checkable
         if not (tree_item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
-            # Item is not checkable (e.g., it's marked as "keep") - just ignore the click
             return
 
-        # Toggle the checkbox
         self.items_tree.blockSignals(True)
         if tree_item.checkState(0) == Qt.CheckState.Checked:
             tree_item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -1191,7 +1177,7 @@ class DeleteBookmarksDialog(QDialog):
         self.update_preview()
 
     def on_item_changed(self, tree_item: QTreeWidgetItem, column: int):
-        """Handle item checkbox changed (when checkbox is directly clicked)."""
+        """Handle item checkbox changed."""
         if column != 0:
             return
 
@@ -1201,9 +1187,7 @@ class DeleteBookmarksDialog(QDialog):
         if bookmark_id is None:
             return
 
-        # Check if this is the "keep" item
         if group_id is not None and self.keep_in_group.get(group_id) == bookmark_id:
-            # Can't select the keep item
             self.items_tree.blockSignals(True)
             tree_item.setCheckState(0, Qt.CheckState.Unchecked)
             self.items_tree.blockSignals(False)
@@ -1230,7 +1214,6 @@ class DeleteBookmarksDialog(QDialog):
 
         menu = QMenu(self)
 
-        # Toggle selection
         if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             if item.checkState(0) == Qt.CheckState.Checked:
                 action = menu.addAction("Uncheck (Don't Delete)")
@@ -1239,12 +1222,11 @@ class DeleteBookmarksDialog(QDialog):
                 action = menu.addAction("Check (Mark for Deletion)")
                 action.triggered.connect(lambda: self._toggle_item(item, True))
 
-        # For duplicate items, add "Set as Keep" option
         if group_id is not None:
             is_keep = self.keep_in_group.get(group_id) == bookmark_id
             if not is_keep:
                 menu.addSeparator()
-                keep_action = menu.addAction("\u2713 Set as KEEP (don't delete this one)")
+                keep_action = menu.addAction("✓ Set as KEEP (don't delete this one)")
                 keep_action.triggered.connect(lambda: self._set_as_keep(item, bookmark_id, group_id))
 
         if menu.actions():
@@ -1267,38 +1249,31 @@ class DeleteBookmarksDialog(QDialog):
         self.update_preview()
 
     def _set_as_keep(self, item: QTreeWidgetItem, bookmark_id: int, group_id: int):
-        """Set this bookmark as the one to keep in the duplicate group."""
-        # Update the keep_in_group mapping
+        """Set this bookmark as the one to keep."""
         old_keep = self.keep_in_group.get(group_id)
         self.keep_in_group[group_id] = bookmark_id
 
-        # Remove new keep item from deletion
         self.selected_for_deletion.discard(bookmark_id)
 
-        # Add old keep item to deletion (if it was previously marked as keep)
         if old_keep is not None and old_keep != bookmark_id:
             self.selected_for_deletion.add(old_keep)
 
-        # Rebuild the tree to update visuals
         self.apply_filters()
 
     def select_all_visible(self):
-        """Select all visible (filtered) items."""
+        """Select all visible items."""
         self.items_tree.blockSignals(True)
 
-        # Only select items that are currently visible after filtering
         for bookmark_id in self.visible_items:
             item = self.all_items.get(bookmark_id)
             if not item:
                 continue
 
-            # Don't select "keep" items in duplicate groups
             if item.group_id is not None and self.keep_in_group.get(item.group_id) == bookmark_id:
                 continue
 
             self.selected_for_deletion.add(bookmark_id)
 
-        # Update tree widget checkboxes
         for i in range(self.items_tree.topLevelItemCount()):
             tree_item = self.items_tree.topLevelItem(i)
             bookmark_id = tree_item.data(0, Qt.ItemDataRole.UserRole)
@@ -1314,7 +1289,6 @@ class DeleteBookmarksDialog(QDialog):
         self.items_tree.blockSignals(True)
         self.selected_for_deletion.clear()
 
-        # Update all tree items
         for i in range(self.items_tree.topLevelItemCount()):
             tree_item = self.items_tree.topLevelItem(i)
             if tree_item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
@@ -1324,14 +1298,12 @@ class DeleteBookmarksDialog(QDialog):
         self.update_preview()
 
     def deselect_visible(self):
-        """Deselect only visible (filtered) items."""
+        """Deselect only visible items."""
         self.items_tree.blockSignals(True)
 
-        # Remove visible items from selection
         for bookmark_id in self.visible_items:
             self.selected_for_deletion.discard(bookmark_id)
 
-        # Update tree widget checkboxes
         for i in range(self.items_tree.topLevelItemCount()):
             tree_item = self.items_tree.topLevelItem(i)
             if tree_item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
@@ -1344,22 +1316,30 @@ class DeleteBookmarksDialog(QDialog):
         """Auto-select duplicates, keeping the first in each group."""
         self.items_tree.blockSignals(True)
 
-        # For each group, keep the first and select the rest
         for group_id, items_list in self._get_duplicate_groups().items():
             if len(items_list) < 2:
                 continue
 
-            # Keep first
-            self.keep_in_group[group_id] = items_list[0].bookmark_id
-            self.selected_for_deletion.discard(items_list[0].bookmark_id)
+            # Find first non-dead-link to keep
+            keep_item = None
+            for item in items_list:
+                if "dead_link" not in item.reason:
+                    keep_item = item
+                    break
 
-            # Select rest
-            for item in items_list[1:]:
-                self.selected_for_deletion.add(item.bookmark_id)
+            if keep_item:
+                self.keep_in_group[group_id] = keep_item.bookmark_id
+                self.selected_for_deletion.discard(keep_item.bookmark_id)
+
+                for item in items_list:
+                    if item.bookmark_id != keep_item.bookmark_id:
+                        self.selected_for_deletion.add(item.bookmark_id)
+            else:
+                # All are dead links - select all for deletion
+                for item in items_list:
+                    self.selected_for_deletion.add(item.bookmark_id)
 
         self.items_tree.blockSignals(False)
-
-        # Rebuild tree to update visuals
         self.apply_filters()
 
     def _get_duplicate_groups(self) -> Dict[int, List[DeletionItem]]:
@@ -1373,14 +1353,11 @@ class DeleteBookmarksDialog(QDialog):
         return groups
 
     def update_preview(self):
-        """Update the deletion preview panel."""
+        """Update the deletion preview panel with a tree view."""
+        self.preview_tree.clear()
+
         if not self.selected_for_deletion:
-            self.preview_text.setHtml(
-                "<p style='color: gray;'>No bookmarks selected for deletion.</p>"
-                "<p>Check the boxes next to bookmarks you want to delete.</p>"
-                "<p><b>Tip:</b> Use 'Auto-Select Duplicates' to quickly select "
-                "all duplicates while keeping one copy of each.</p>"
-            )
+            self.summary_label.setText("No items selected for deletion.\n\nTip: Use 'Auto-Select Duplicates' to quickly select all duplicates while keeping one copy of each.")
             self.delete_btn.setEnabled(False)
             self.copy_ids_btn.setEnabled(False)
             self.save_ids_btn.setEnabled(False)
@@ -1390,41 +1367,61 @@ class DeleteBookmarksDialog(QDialog):
         self.copy_ids_btn.setEnabled(True)
         self.save_ids_btn.setEnabled(True)
 
-        # Build summary
         selected_items = [self.all_items[bid] for bid in self.selected_for_deletion if bid in self.all_items]
 
-        html = "<h3>Selected for Deletion</h3>"
-        html += f"<p><b>Total: {len(selected_items)} bookmarks</b></p>"
+        # Group by browser -> profile -> items
+        by_browser: Dict[str, Dict[str, List[DeletionItem]]] = {}
+        for item in selected_items:
+            if item.browser_name not in by_browser:
+                by_browser[item.browser_name] = {}
+            if item.profile_name not in by_browser[item.browser_name]:
+                by_browser[item.browser_name][item.profile_name] = []
+            by_browser[item.browser_name][item.profile_name].append(item)
 
-        # By category
+        # Build tree
+        for browser_name, profiles in sorted(by_browser.items()):
+            browser_count = sum(len(items) for items in profiles.values())
+            browser_item = QTreeWidgetItem([f"🌐 {browser_name}", f"{browser_count} items"])
+            browser_item.setExpanded(True)
+
+            for profile_name, items in sorted(profiles.items()):
+                profile_item = QTreeWidgetItem([f"👤 {profile_name}", f"{len(items)} items"])
+
+                for item in items[:20]:  # Limit to 20 items per profile to avoid slowdown
+                    title_display = item.title[:40] + "..." if len(item.title) > 40 else item.title
+                    reason_parts = []
+                    if "dead_link" in item.reason:
+                        reason_parts.append(item.dead_link_detail or "Dead")
+                    if "duplicate" in item.reason:
+                        if "exact" in item.reason:
+                            reason_parts.append("Exact Dup")
+                        else:
+                            reason_parts.append("Similar Dup")
+
+                    bookmark_item = QTreeWidgetItem([f"📄 {title_display}", ", ".join(reason_parts)])
+                    bookmark_item.setToolTip(0, f"{item.title}\n{item.url}")
+                    bookmark_item.setToolTip(1, f"Folder: {item.folder_path}")
+                    profile_item.addChild(bookmark_item)
+
+                if len(items) > 20:
+                    more_item = QTreeWidgetItem([f"... and {len(items) - 20} more", ""])
+                    profile_item.addChild(more_item)
+
+                profile_item.setExpanded(True)
+                browser_item.addChild(profile_item)
+
+            self.preview_tree.addTopLevelItem(browser_item)
+
+        # Summary
         by_reason: Dict[str, int] = {}
         for item in selected_items:
             for reason in item.reason.split(","):
                 reason_display = reason.replace("_", " ").title()
                 by_reason[reason_display] = by_reason.get(reason_display, 0) + 1
 
-        html += "<p><b>By category:</b></p><ul>"
+        summary_parts = [f"Total: {len(selected_items)} bookmarks"]
         for reason, count in sorted(by_reason.items()):
-            html += f"<li>{reason}: {count}</li>"
-        html += "</ul>"
-
-        # By browser
-        by_browser: Dict[str, Dict[str, int]] = {}
-        for item in selected_items:
-            if item.browser_name not in by_browser:
-                by_browser[item.browser_name] = {}
-            if item.profile_name not in by_browser[item.browser_name]:
-                by_browser[item.browser_name][item.profile_name] = 0
-            by_browser[item.browser_name][item.profile_name] += 1
-
-        html += "<p><b>By browser:</b></p><ul>"
-        for browser, profiles in sorted(by_browser.items()):
-            browser_total = sum(profiles.values())
-            html += f"<li><b>{browser}</b>: {browser_total}<ul>"
-            for profile, count in sorted(profiles.items()):
-                html += f"<li>{profile}: {count}</li>"
-            html += "</ul></li>"
-        html += "</ul>"
+            summary_parts.append(f"• {reason}: {count}")
 
         # Check running browsers
         running = BrowserProcessService.get_running_browsers()
@@ -1432,13 +1429,12 @@ class DeleteBookmarksDialog(QDialog):
         running_affected = [b for b in running if b.browser_name in affected_browsers]
 
         if running_affected:
-            html += "<hr><p style='color: #856404; background-color: #fff3cd; padding: 8px;'>"
-            html += "<b>\u26a0\ufe0f Browsers to close:</b><br>"
+            summary_parts.append("")
+            summary_parts.append("⚠️ Browsers to close:")
             for b in running_affected:
-                html += f"&bull; {b.browser_name}<br>"
-            html += "</p>"
+                summary_parts.append(f"  • {b.browser_name}")
 
-        self.preview_text.setHtml(html)
+        self.summary_label.setText("\n".join(summary_parts))
 
     def show_restore_dialog(self):
         """Show dialog to restore from a backup."""
@@ -1457,13 +1453,9 @@ class DeleteBookmarksDialog(QDialog):
         if not self.selected_for_deletion:
             return
 
-        # Get selected items
         selected_items = [self.all_items[bid] for bid in self.selected_for_deletion if bid in self.all_items]
-
-        # Get affected browsers
         affected_browsers = {item.browser_name for item in selected_items}
 
-        # Check which are running
         running = BrowserProcessService.get_running_browsers()
         running_affected = [b for b in running if b.browser_name in affected_browsers]
 
@@ -1475,7 +1467,6 @@ class DeleteBookmarksDialog(QDialog):
             if result != QDialog.DialogCode.Accepted:
                 return
 
-            # Check again
             still_running = [
                 b.browser_name for b in BrowserProcessService.get_running_browsers()
                 if b.browser_name in affected_browsers
@@ -1491,7 +1482,6 @@ class DeleteBookmarksDialog(QDialog):
                 )
                 return
 
-        # Confirm deletion
         total = len(selected_items)
         reply = QMessageBox.question(
             self,
@@ -1509,7 +1499,6 @@ class DeleteBookmarksDialog(QDialog):
 
     def perform_deletion(self, items: List[DeletionItem]):
         """Perform the actual deletion."""
-        # Convert to BookmarkToDelete
         bookmarks_to_delete = [
             BookmarkToDelete(
                 bookmark_id=item.bookmark_id,
@@ -1538,42 +1527,31 @@ class DeleteBookmarksDialog(QDialog):
             warnings = [r for r in results if r.success and r.error_message]
 
             message = f"Successfully deleted {success_count} bookmarks.\n\n"
-
-            # Show details per profile
             message += "Details by profile:\n"
             for r in results:
-                status = "\u2713" if r.success else "\u2717"
-                message += f"  {status} {r.browser_name}/{r.profile_name}: "
-                message += f"{r.bookmarks_deleted} deleted\n"
+                status = "✓" if r.success else "✗"
+                message += f"  {status} {r.browser_name}/{r.profile_name}: {r.bookmarks_deleted} deleted\n"
 
             message += "\n"
 
             if failed:
                 message += f"Failed to modify {len(failed)} profile(s):\n"
                 for r in failed:
-                    message += f"  \u2022 {r.browser_name}/{r.profile_name}: {r.error_message}\n"
+                    message += f"  • {r.browser_name}/{r.profile_name}: {r.error_message}\n"
                 message += "\n"
 
             if warnings:
                 message += "Warnings:\n"
                 for r in warnings:
-                    message += f"  \u2022 {r.browser_name}/{r.profile_name}: {r.error_message}\n"
+                    message += f"  • {r.browser_name}/{r.profile_name}: {r.error_message}\n"
                 message += "\n"
 
-            message += "Backups created in:\n"
-            message += str(self.modifier_service.backup_dir)
-
-            message += "\n\n\u26a0\ufe0f NOTE: If you have browser sync enabled,\n"
-            message += "bookmarks may reappear when the browser syncs\n"
-            message += "from other devices. You may need to also delete\n"
-            message += "them on your phone/tablet/other computers."
+            message += f"Backups created in:\n{self.modifier_service.backup_dir}\n\n"
+            message += "⚠️ NOTE: If you have browser sync enabled, bookmarks may reappear."
 
             QMessageBox.information(self, "Deletion Complete", message)
 
-            # Remove from database
             self._remove_from_database(items)
-
-            # Reload
             self.load_data()
 
         except Exception as e:
@@ -1592,19 +1570,13 @@ class DeleteBookmarksDialog(QDialog):
     def _get_selected_ids_text(self) -> str:
         """Get the browser bookmark IDs for selected items as text."""
         selected_items = [self.all_items[bid] for bid in self.selected_for_deletion if bid in self.all_items]
-        # Return the browser_bookmark_id (which is the ID in the browser's bookmark file)
         ids = [str(item.browser_bookmark_id) for item in selected_items]
         return '\n'.join(ids)
 
     def _create_backups_for_selected(self) -> str:
-        """Create backups of browser bookmark files for selected items.
-
-        Returns:
-            Message describing backups created
-        """
+        """Create backups of browser bookmark files for selected items."""
         selected_items = [self.all_items[bid] for bid in self.selected_for_deletion if bid in self.all_items]
 
-        # Group by profile to avoid duplicate backups
         profiles_to_backup = {}
         for item in selected_items:
             key = (item.profile_path, item.browser_name, item.profile_name)
@@ -1614,8 +1586,7 @@ class DeleteBookmarksDialog(QDialog):
         backup_paths = []
         for profile_path, browser_name, profile_name in profiles_to_backup.keys():
             try:
-                from pathlib import Path
-                backup_path = self.modifier_service.create_backup(
+                self.modifier_service.create_backup(
                     Path(profile_path), browser_name, profile_name
                 )
                 backup_paths.append(f"  • {browser_name}/{profile_name}")
@@ -1625,13 +1596,12 @@ class DeleteBookmarksDialog(QDialog):
         return "\n".join(backup_paths)
 
     def copy_ids_to_clipboard(self):
-        """Copy selected bookmark IDs to clipboard for use with the browser extension."""
+        """Copy selected bookmark IDs to clipboard."""
         ids_text = self._get_selected_ids_text()
         if not ids_text:
             QMessageBox.warning(self, "No Selection", "No bookmarks selected.")
             return
 
-        # Create backups first
         backup_info = self._create_backups_for_selected()
 
         clipboard = QApplication.clipboard()
@@ -1649,7 +1619,7 @@ class DeleteBookmarksDialog(QDialog):
         )
 
     def save_ids_to_file(self):
-        """Save selected bookmark IDs to a file for use with the browser extension."""
+        """Save selected bookmark IDs to a file."""
         from PyQt6.QtWidgets import QFileDialog
 
         ids_text = self._get_selected_ids_text()
@@ -1667,7 +1637,6 @@ class DeleteBookmarksDialog(QDialog):
         if not filename:
             return
 
-        # Create backups first
         backup_info = self._create_backups_for_selected()
 
         try:
@@ -1705,10 +1674,10 @@ Bookmarks API, which properly syncs deletions to your account.</p>
 
 <h3>How to Install the Extension</h3>
 <ol>
-<li>Open Chrome or Edge and go to <code>chrome://extensions</code> (or <code>edge://extensions</code>)</li>
+<li>Open Chrome or Edge and go to <code>chrome://extensions</code></li>
 <li>Enable "Developer mode" (toggle in top right)</li>
 <li>Click "Load unpacked"</li>
-<li>Navigate to:<br><code>S:\\source\\Bookmark_Manager\\browser_extension</code></li>
+<li>Navigate to the browser_extension folder</li>
 <li>Click "Select Folder"</li>
 </ol>
 
@@ -1720,12 +1689,6 @@ Bookmarks API, which properly syncs deletions to your account.</p>
 <li>Paste the IDs or load the file</li>
 <li>Click "Delete Bookmarks"</li>
 </ol>
-
-<p style="color: #155724; background-color: #d4edda; padding: 10px; border-radius: 4px;">
-<b>Tip:</b> After deleting via the extension, wait a few seconds for
-sync to complete, then re-import your bookmarks in the Bookmark Manager
-to update the database.
-</p>
 """
 
         msg = QMessageBox(self)
@@ -1736,11 +1699,7 @@ to update the database.
         msg.exec()
 
     def refresh_from_browsers(self):
-        """Re-scan browser bookmark files and update the database.
-
-        This removes bookmarks from the database that no longer exist
-        in the browser files, and adds any new ones.
-        """
+        """Re-scan browser bookmark files and update the database."""
         reply = QMessageBox.question(
             self,
             "Refresh from Browsers",
@@ -1762,9 +1721,6 @@ to update the database.
         progress.show()
 
         try:
-            import_service = ImportService(self.db)
-
-            # Get all profiles currently in the database
             cursor = self.db.execute("""
                 SELECT browser_profile_id, browser_name, browser_profile_name, profile_path
                 FROM browser_profiles
@@ -1773,10 +1729,8 @@ to update the database.
                           for row in cursor.fetchall()}
 
             total_removed = 0
-            total_added = 0
             profiles_updated = []
 
-            # For each profile, get current bookmarks from browser and sync with database
             for profile_id, profile_info in db_profiles.items():
                 profile_path = Path(profile_info['path'])
                 bookmarks_file = profile_path / "Bookmarks"
@@ -1786,10 +1740,8 @@ to update the database.
 
                 progress.setLabelText(f"Scanning {profile_info['browser_name']}/{profile_info['profile_name']}...")
 
-                # Get bookmark IDs currently in the browser
                 browser_ids = self._get_browser_bookmark_ids(bookmarks_file)
 
-                # Get bookmark IDs currently in our database for this profile
                 cursor = self.db.execute("""
                     SELECT bookmark_id, browser_bookmark_id
                     FROM bookmarks
@@ -1797,13 +1749,11 @@ to update the database.
                 """, (profile_id,))
                 db_bookmarks = {str(row[1]): row[0] for row in cursor.fetchall()}
 
-                # Find bookmarks to remove (in DB but not in browser)
                 to_remove = []
                 for browser_id, bookmark_id in db_bookmarks.items():
                     if browser_id not in browser_ids:
                         to_remove.append(bookmark_id)
 
-                # Remove them from database
                 for bookmark_id in to_remove:
                     self.db.execute("DELETE FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,))
 
@@ -1814,7 +1764,6 @@ to update the database.
             self.db.commit()
             progress.close()
 
-            # Show results
             message = "Refresh complete!\n\n"
             if profiles_updated:
                 message += "Changes:\n"
@@ -1825,7 +1774,6 @@ to update the database.
 
             QMessageBox.information(self, "Refresh Complete", message)
 
-            # Reload the dialog data
             self.load_data()
 
         except Exception as e:
@@ -1833,14 +1781,7 @@ to update the database.
             QMessageBox.critical(self, "Error", f"Error during refresh:\n\n{str(e)}")
 
     def _get_browser_bookmark_ids(self, bookmarks_file: Path) -> Set[str]:
-        """Get all bookmark IDs from a browser bookmarks file.
-
-        Args:
-            bookmarks_file: Path to the Bookmarks JSON file
-
-        Returns:
-            Set of bookmark IDs (as strings)
-        """
+        """Get all bookmark IDs from a browser bookmarks file."""
         import json
 
         ids = set()
