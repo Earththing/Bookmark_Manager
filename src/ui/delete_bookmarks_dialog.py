@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSortFilterProxyModel
 from PyQt6.QtWidgets import (
@@ -21,6 +22,65 @@ from ..models.bookmark import Bookmark
 from ..services.bookmark_modifier import BookmarkModifierService, BookmarkToDelete
 from ..services.browser_process import BrowserProcessService
 from ..services.import_service import ImportService
+
+
+def parse_url_components(url: str) -> Tuple[str, str, str]:
+    """Parse a URL into its domain components.
+
+    Args:
+        url: The URL to parse
+
+    Returns:
+        Tuple of (subdomain, domain, tld)
+        - subdomain: e.g., "www" or "blog" or "" if none
+        - domain: e.g., "example" (second-level domain)
+        - tld: e.g., "com" or "co.uk" (top-level domain)
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.netloc.lower()
+
+        # Remove port if present
+        if ':' in hostname:
+            hostname = hostname.split(':')[0]
+
+        if not hostname:
+            return ("", "", "")
+
+        # Handle IP addresses
+        if hostname.replace('.', '').isdigit():
+            return ("", hostname, "")
+
+        parts = hostname.split('.')
+
+        # Common multi-part TLDs
+        multi_tlds = {'co.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'co.in',
+                      'org.uk', 'net.au', 'gov.uk', 'ac.uk', 'edu.au'}
+
+        if len(parts) >= 2:
+            # Check for multi-part TLD
+            potential_multi_tld = '.'.join(parts[-2:])
+            if potential_multi_tld in multi_tlds:
+                tld = potential_multi_tld
+                if len(parts) >= 3:
+                    domain = parts[-3]
+                    subdomain = '.'.join(parts[:-3]) if len(parts) > 3 else ""
+                else:
+                    domain = ""
+                    subdomain = ""
+            else:
+                tld = parts[-1]
+                domain = parts[-2] if len(parts) >= 2 else ""
+                subdomain = '.'.join(parts[:-2]) if len(parts) > 2 else ""
+        elif len(parts) == 1:
+            return ("", parts[0], "")
+        else:
+            return ("", "", "")
+
+        return (subdomain, domain, tld)
+
+    except Exception:
+        return ("", "", "")
 
 
 class MultiSelectFilterWidget(QWidget):
@@ -164,6 +224,15 @@ class DeletionItem:
     group_id: Optional[int] = None  # For duplicates, which group they belong to
     folder_path: Optional[str] = None  # Folder location in browser bookmarks
     dead_link_detail: Optional[str] = None  # Status code or error message for dead links
+    # URL components for filtering
+    url_subdomain: str = ""
+    url_domain: str = ""
+    url_tld: str = ""
+
+    def __post_init__(self):
+        """Parse URL components after initialization."""
+        if self.url and not self.url_domain:
+            self.url_subdomain, self.url_domain, self.url_tld = parse_url_components(self.url)
 
 
 class DeleteBookmarksDialog(QDialog):
@@ -309,33 +378,94 @@ class DeleteBookmarksDialog(QDialog):
         middle_layout = QVBoxLayout(middle_widget)
         middle_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Filter bar for column filtering - horizontal layout with multi-select filters
-        filter_bar = QHBoxLayout()
-        filter_bar.setSpacing(10)
+        # Filter bar for column filtering - two rows of multi-select filters
+        filter_container = QVBoxLayout()
+        filter_container.setSpacing(4)
 
-        # Create filter widgets for each filterable column
-        # Columns: 0=Select, 1=Title, 2=Folder, 3=URL, 4=Browser/Profile, 5=Dead Link, 6=Duplicate
-        filter_columns = [
-            (2, "Folder"),
-            (4, "Browser/Profile"),
-            (5, "Dead Link"),
-            (6, "Duplicate")
-        ]
-        for col_idx, col_name in filter_columns:
-            filter_widget = MultiSelectFilterWidget(col_name)
-            filter_widget.setMinimumWidth(130)
-            filter_widget.setMaximumWidth(180)
-            filter_widget.set_filter_changed_callback(self.on_column_filter_changed)
-            self.filter_widgets[col_idx] = filter_widget
-            filter_bar.addWidget(filter_widget)
+        # Row 1: Title, Domain, TLD filters
+        filter_row1 = QHBoxLayout()
+        filter_row1.setSpacing(8)
 
-        filter_bar.addStretch()
+        # Title filter (uses column index 1)
+        title_filter = MultiSelectFilterWidget("Title")
+        title_filter.setMinimumWidth(120)
+        title_filter.setMaximumWidth(160)
+        title_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[1] = title_filter
+        filter_row1.addWidget(title_filter)
+
+        # Domain filter (uses virtual column index 100 - not an actual tree column)
+        domain_filter = MultiSelectFilterWidget("Domain")
+        domain_filter.setMinimumWidth(120)
+        domain_filter.setMaximumWidth(160)
+        domain_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[100] = domain_filter  # Virtual column for domain
+        filter_row1.addWidget(domain_filter)
+
+        # TLD filter (uses virtual column index 101)
+        tld_filter = MultiSelectFilterWidget("TLD")
+        tld_filter.setMinimumWidth(80)
+        tld_filter.setMaximumWidth(100)
+        tld_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[101] = tld_filter  # Virtual column for TLD
+        filter_row1.addWidget(tld_filter)
+
+        # Subdomain filter (uses virtual column index 102)
+        subdomain_filter = MultiSelectFilterWidget("Subdomain")
+        subdomain_filter.setMinimumWidth(100)
+        subdomain_filter.setMaximumWidth(130)
+        subdomain_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[102] = subdomain_filter  # Virtual column for subdomain
+        filter_row1.addWidget(subdomain_filter)
+
+        filter_row1.addStretch()
+        filter_container.addLayout(filter_row1)
+
+        # Row 2: Folder, Browser/Profile, Dead Link, Duplicate filters
+        filter_row2 = QHBoxLayout()
+        filter_row2.setSpacing(8)
+
+        # Folder filter (column 2)
+        folder_filter = MultiSelectFilterWidget("Folder")
+        folder_filter.setMinimumWidth(120)
+        folder_filter.setMaximumWidth(160)
+        folder_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[2] = folder_filter
+        filter_row2.addWidget(folder_filter)
+
+        # Browser/Profile filter (column 4)
+        browser_filter = MultiSelectFilterWidget("Browser/Profile")
+        browser_filter.setMinimumWidth(130)
+        browser_filter.setMaximumWidth(170)
+        browser_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[4] = browser_filter
+        filter_row2.addWidget(browser_filter)
+
+        # Dead Link filter (column 5)
+        dead_link_filter = MultiSelectFilterWidget("Dead Link")
+        dead_link_filter.setMinimumWidth(110)
+        dead_link_filter.setMaximumWidth(150)
+        dead_link_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[5] = dead_link_filter
+        filter_row2.addWidget(dead_link_filter)
+
+        # Duplicate filter (column 6)
+        duplicate_filter = MultiSelectFilterWidget("Duplicate")
+        duplicate_filter.setMinimumWidth(100)
+        duplicate_filter.setMaximumWidth(130)
+        duplicate_filter.set_filter_changed_callback(self.on_column_filter_changed)
+        self.filter_widgets[6] = duplicate_filter
+        filter_row2.addWidget(duplicate_filter)
+
+        filter_row2.addStretch()
 
         clear_filters_btn = QPushButton("Clear All Filters")
         clear_filters_btn.clicked.connect(self.clear_all_filters)
-        filter_bar.addWidget(clear_filters_btn)
+        filter_row2.addWidget(clear_filters_btn)
 
-        middle_layout.addLayout(filter_bar)
+        filter_container.addLayout(filter_row2)
+
+        middle_layout.addLayout(filter_container)
 
         # Tree widget showing bookmarks grouped by category
         self.items_tree = QTreeWidget()
@@ -611,9 +741,7 @@ class DeleteBookmarksDialog(QDialog):
             if len(valid_ids) < 2:
                 continue
 
-            # Set first as the one to keep by default
-            self.keep_in_group[group_id] = valid_ids[0]
-
+            # Process each bookmark in the group first
             for bookmark_id in valid_ids:
                 # Skip if already in items (e.g., also a dead link)
                 if bookmark_id in self.all_items:
@@ -637,6 +765,21 @@ class DeleteBookmarksDialog(QDialog):
                     group_id=group_id,
                     folder_path=bd['folder_path']
                 )
+
+            # Now choose which one to keep - prefer non-dead-links
+            # Find first bookmark that is NOT a dead link
+            keep_id = None
+            for bookmark_id in valid_ids:
+                item = self.all_items.get(bookmark_id)
+                if item and "dead_link" not in item.reason:
+                    keep_id = bookmark_id
+                    break
+
+            # If all are dead links, don't auto-keep any (let user decide)
+            # Otherwise keep the first non-dead-link
+            if keep_id is not None:
+                self.keep_in_group[group_id] = keep_id
+            # If all are dead links, we don't set a keep - user must choose
 
     def _format_dead_link_detail(self, status_code: Optional[int], error_message: Optional[str]) -> str:
         """Format dead link details into a short, descriptive string.
@@ -858,9 +1001,21 @@ class DeleteBookmarksDialog(QDialog):
         return True
 
     def _get_item_column_value(self, item: DeletionItem, col_idx: int) -> str:
-        """Get the display value for a column from a DeletionItem."""
+        """Get the display value for a column from a DeletionItem.
+
+        Column indices:
+            1 = Title
+            2 = Folder
+            3 = URL
+            4 = Browser/Profile
+            5 = Dead Link
+            6 = Duplicate
+            100 = Domain (virtual)
+            101 = TLD (virtual)
+            102 = Subdomain (virtual)
+        """
         if col_idx == 1:  # Title
-            return item.title[:60]
+            return item.title
         elif col_idx == 2:  # Folder
             return item.folder_path or "Bookmarks Bar"
         elif col_idx == 3:  # URL
@@ -877,6 +1032,12 @@ class DeleteBookmarksDialog(QDialog):
             elif "similar_duplicate" in item.reason:
                 return "Similar"
             return ""  # Not a duplicate
+        elif col_idx == 100:  # Domain (virtual column)
+            return item.url_domain or ""
+        elif col_idx == 101:  # TLD (virtual column)
+            return item.url_tld or ""
+        elif col_idx == 102:  # Subdomain (virtual column)
+            return item.url_subdomain or ""
         return ""
 
     def _sort_items(self, items: List[DeletionItem]) -> List[DeletionItem]:
