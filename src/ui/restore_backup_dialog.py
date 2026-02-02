@@ -327,7 +327,15 @@ class RestoreBackupDialog(QDialog):
             )
 
     def _find_profile_path(self, browser_name: str, profile_name: str) -> Optional[Path]:
-        """Find the path to a browser profile."""
+        """Find the path to a browser profile.
+
+        The profile_name could be:
+        - An email address (e.g., "aaron@johnson-clan.net")
+        - A display name (e.g., "John Doe")
+        - A folder name (e.g., "Default", "Profile 1")
+
+        We need to search through profile Preferences files to find the match.
+        """
         import os
 
         local_app_data = os.environ.get('LOCALAPPDATA', '')
@@ -339,28 +347,74 @@ class RestoreBackupDialog(QDialog):
         else:
             return None
 
-        # Try to find the profile
-        # Profile name might be "Default", "Profile 1", etc.
-        # Our backup uses underscores instead of spaces
+        if not base_path.exists():
+            return None
 
-        # Try exact match first
+        # Normalize the profile name for comparison (replace underscores with various chars)
+        profile_name_normalized = profile_name.lower().replace("_", " ")
+        profile_name_underscore = profile_name.lower()
+
+        # Try exact folder name match first
         profile_path = base_path / profile_name
-        if profile_path.exists():
+        if profile_path.exists() and (profile_path / "Bookmarks").exists():
             return profile_path
 
         # Try with space instead of underscore
         profile_path = base_path / profile_name.replace("_", " ")
-        if profile_path.exists():
+        if profile_path.exists() and (profile_path / "Bookmarks").exists():
             return profile_path
 
-        # Search all profiles
+        # Search all profile directories and check their Preferences file
         for item in base_path.iterdir():
-            if item.is_dir():
-                # Check if name matches (case-insensitive, with or without spaces)
-                item_name_normalized = item.name.lower().replace(" ", "_")
-                profile_name_normalized = profile_name.lower().replace(" ", "_")
+            if not item.is_dir():
+                continue
 
-                if item_name_normalized == profile_name_normalized:
-                    return item
+            # Skip known non-profile directories
+            if item.name in ['Crashpad', 'CertificateTransparency', 'Crowd Deny',
+                            'FileTypePolicies', 'GrShaderCache', 'ShaderCache',
+                            'Safe Browsing', 'SSLErrorAssistant', 'SwReporter',
+                            'hyphen-data', 'OnDeviceHeadSuggestModel', 'ZxcvbnData']:
+                continue
+
+            preferences_file = item / "Preferences"
+            bookmarks_file = item / "Bookmarks"
+
+            # Skip if no bookmarks file
+            if not bookmarks_file.exists():
+                continue
+
+            # Check folder name match (case-insensitive)
+            item_name_lower = item.name.lower()
+            if item_name_lower == profile_name_normalized or item_name_lower == profile_name_underscore:
+                return item
+
+            # Check Preferences file for email/name match
+            if preferences_file.exists():
+                try:
+                    with open(preferences_file, "r", encoding="utf-8") as f:
+                        prefs = json.load(f)
+
+                    # Check account_info for email match
+                    account_info = prefs.get("account_info", [])
+                    if account_info:
+                        for account in account_info:
+                            email = account.get("email", "").lower()
+                            full_name = account.get("full_name", "").lower()
+
+                            # Compare with underscores replaced by @ for email
+                            if email and (email == profile_name_normalized or
+                                         email == profile_name_underscore.replace("_", "@")):
+                                return item
+                            if full_name and full_name == profile_name_normalized:
+                                return item
+
+                    # Check profile.name
+                    profile_info = prefs.get("profile", {})
+                    pref_name = profile_info.get("name", "").lower()
+                    if pref_name and pref_name == profile_name_normalized:
+                        return item
+
+                except (json.JSONDecodeError, IOError):
+                    continue
 
         return None
