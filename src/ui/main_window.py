@@ -18,9 +18,13 @@ from PyQt6.QtWidgets import (
     QMenu,
     QApplication,
     QPushButton,
+    QFrame,
+    QScrollArea,
+    QSizePolicy,
+    QGroupBox,
 )
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices, QColor
+from PyQt6.QtCore import Qt, QUrl, QSize
+from PyQt6.QtGui import QAction, QDesktopServices, QColor, QPixmap
 
 from ..models.database import get_database, reset_database
 from ..models.bookmark import Bookmark
@@ -31,6 +35,7 @@ from .dead_link_dialog import DeadLinkDialog
 from .duplicate_dialog import DuplicateDialog, normalize_url
 from .refresh_all_dialog import RefreshAllDialog
 from .delete_bookmarks_dialog import DeleteBookmarksDialog
+from ..services.thumbnail_service import get_thumbnail_service
 
 
 class MainWindow(QMainWindow):
@@ -47,6 +52,15 @@ class MainWindow(QMainWindow):
         self.dead_link_bookmark_ids = set()
         self.exact_duplicate_counts = {}
         self.similar_duplicate_counts = {}
+
+        # Thumbnail service
+        self.thumbnail_service = get_thumbnail_service()
+        self.thumbnail_service.thumbnail_ready.connect(self.on_thumbnail_ready)
+        self.thumbnail_service.thumbnail_error.connect(self.on_thumbnail_error)
+        self.thumbnail_service.thumbnail_loading.connect(self.on_thumbnail_loading)
+
+        # Currently selected bookmark URL for thumbnail
+        self.selected_url = None
 
         self.setup_ui()
         self.load_status_data()
@@ -81,17 +95,17 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(top_layout)
 
-        # Create splitter for sidebar and main content
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Create main splitter for sidebar, content, and preview
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left sidebar - folder tree
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderLabel("Folders")
-        self.folder_tree.setMinimumWidth(250)
+        self.folder_tree.setMinimumWidth(200)
         self.folder_tree.itemClicked.connect(self.on_folder_clicked)
-        splitter.addWidget(self.folder_tree)
+        main_splitter.addWidget(self.folder_tree)
 
-        # Right side - bookmark table
+        # Middle - bookmark table
         self.bookmark_table = QTableWidget()
         self.bookmark_table.setColumnCount(7)
         self.bookmark_table.setHorizontalHeaderLabels([
@@ -116,11 +130,16 @@ class MainWindow(QMainWindow):
         self.bookmark_table.doubleClicked.connect(self.on_bookmark_double_clicked)
         self.bookmark_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.bookmark_table.customContextMenuRequested.connect(self.show_bookmark_context_menu)
-        splitter.addWidget(self.bookmark_table)
+        self.bookmark_table.itemSelectionChanged.connect(self.on_bookmark_selection_changed)
+        main_splitter.addWidget(self.bookmark_table)
 
-        # Set splitter sizes (25% sidebar, 75% content)
-        splitter.setSizes([250, 950])
-        main_layout.addWidget(splitter)
+        # Right sidebar - thumbnail preview
+        self.preview_panel = self._create_preview_panel()
+        main_splitter.addWidget(self.preview_panel)
+
+        # Set splitter sizes (20% folder tree, 55% content, 25% preview)
+        main_splitter.setSizes([200, 650, 350])
+        main_layout.addWidget(main_splitter)
 
         # Status bar
         self.status_bar = QStatusBar()
@@ -128,6 +147,188 @@ class MainWindow(QMainWindow):
 
         # Create menu bar
         self.create_menu_bar()
+
+    def _create_preview_panel(self) -> QWidget:
+        """Create the thumbnail preview panel."""
+        panel = QWidget()
+        panel.setMinimumWidth(250)
+        panel.setMaximumWidth(500)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Title
+        title_label = QLabel("<b>Page Preview</b>")
+        layout.addWidget(title_label)
+
+        # Bookmark info section
+        info_frame = QFrame()
+        info_frame.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 5px;")
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(8, 8, 8, 8)
+        info_layout.setSpacing(4)
+
+        self.preview_title_label = QLabel("Select a bookmark to preview")
+        self.preview_title_label.setWordWrap(True)
+        self.preview_title_label.setStyleSheet("font-weight: bold;")
+        info_layout.addWidget(self.preview_title_label)
+
+        self.preview_url_label = QLabel("")
+        self.preview_url_label.setWordWrap(True)
+        self.preview_url_label.setStyleSheet("color: #0066cc; font-size: 11px;")
+        self.preview_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        info_layout.addWidget(self.preview_url_label)
+
+        self.preview_folder_label = QLabel("")
+        self.preview_folder_label.setStyleSheet("color: #666; font-size: 11px;")
+        info_layout.addWidget(self.preview_folder_label)
+
+        layout.addWidget(info_frame)
+
+        # Thumbnail image
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumbnail_label.setMinimumHeight(200)
+        self.thumbnail_label.setStyleSheet(
+            "background-color: #e9ecef; border: 1px solid #dee2e6; border-radius: 4px;"
+        )
+        self.thumbnail_label.setText("No preview available")
+
+        # Make thumbnail clickable to open URL
+        self.thumbnail_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.thumbnail_label.mousePressEvent = self._on_thumbnail_clicked
+
+        layout.addWidget(self.thumbnail_label, 1)  # Give it stretch
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.open_url_btn = QPushButton("Open in Browser")
+        self.open_url_btn.clicked.connect(self._open_selected_url)
+        self.open_url_btn.setEnabled(False)
+        button_layout.addWidget(self.open_url_btn)
+
+        self.refresh_thumb_btn = QPushButton("Refresh")
+        self.refresh_thumb_btn.setToolTip("Regenerate thumbnail")
+        self.refresh_thumb_btn.clicked.connect(self._refresh_thumbnail)
+        self.refresh_thumb_btn.setEnabled(False)
+        button_layout.addWidget(self.refresh_thumb_btn)
+
+        layout.addLayout(button_layout)
+
+        # Status
+        self.preview_status_label = QLabel("")
+        self.preview_status_label.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(self.preview_status_label)
+
+        return panel
+
+    def on_bookmark_selection_changed(self):
+        """Handle bookmark selection change - update preview panel."""
+        selected_rows = self.bookmark_table.selectionModel().selectedRows()
+        if not selected_rows:
+            self._clear_preview()
+            return
+
+        row = selected_rows[0].row()
+        title_item = self.bookmark_table.item(row, 0)
+        url_item = self.bookmark_table.item(row, 1)
+        folder_item = self.bookmark_table.item(row, 2)
+
+        if not url_item:
+            self._clear_preview()
+            return
+
+        url = url_item.text()
+        title = title_item.text() if title_item else "(no title)"
+        folder = folder_item.text() if folder_item else ""
+
+        self.selected_url = url
+
+        # Update info labels
+        self.preview_title_label.setText(title)
+        self.preview_url_label.setText(url[:100] + "..." if len(url) > 100 else url)
+        self.preview_url_label.setToolTip(url)
+        self.preview_folder_label.setText(f"📁 {folder}" if folder else "")
+
+        # Enable buttons
+        self.open_url_btn.setEnabled(True)
+        self.refresh_thumb_btn.setEnabled(True)
+
+        # Try to get thumbnail
+        self._load_thumbnail(url)
+
+    def _clear_preview(self):
+        """Clear the preview panel."""
+        self.selected_url = None
+        self.preview_title_label.setText("Select a bookmark to preview")
+        self.preview_url_label.setText("")
+        self.preview_folder_label.setText("")
+        self.thumbnail_label.setPixmap(QPixmap())
+        self.thumbnail_label.setText("No preview available")
+        self.preview_status_label.setText("")
+        self.open_url_btn.setEnabled(False)
+        self.refresh_thumb_btn.setEnabled(False)
+
+    def _load_thumbnail(self, url: str):
+        """Load thumbnail for URL."""
+        pixmap = self.thumbnail_service.get_thumbnail(url)
+        if pixmap:
+            self._display_thumbnail(pixmap)
+            self.preview_status_label.setText("From cache")
+        else:
+            self.thumbnail_label.setText("Loading preview...")
+            self.preview_status_label.setText("Generating thumbnail...")
+
+    def _display_thumbnail(self, pixmap: QPixmap):
+        """Display a thumbnail in the preview panel."""
+        if pixmap.isNull():
+            self.thumbnail_label.setText("Preview not available")
+            return
+
+        # Scale to fit the label while maintaining aspect ratio
+        label_size = self.thumbnail_label.size()
+        scaled = pixmap.scaled(
+            label_size.width() - 10,
+            label_size.height() - 10,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.thumbnail_label.setPixmap(scaled)
+
+    def on_thumbnail_ready(self, url: str, pixmap: QPixmap):
+        """Handle thumbnail generation complete."""
+        if url == self.selected_url:
+            self._display_thumbnail(pixmap)
+            self.preview_status_label.setText("Thumbnail generated")
+
+    def on_thumbnail_error(self, url: str, error: str):
+        """Handle thumbnail generation error."""
+        if url == self.selected_url:
+            self.thumbnail_label.setText(f"Preview error:\n{error[:50]}")
+            self.preview_status_label.setText(f"Error: {error[:30]}")
+
+    def on_thumbnail_loading(self, url: str):
+        """Handle thumbnail loading started."""
+        if url == self.selected_url:
+            self.thumbnail_label.setText("Loading preview...")
+            self.preview_status_label.setText("Generating...")
+
+    def _on_thumbnail_clicked(self, event):
+        """Handle click on thumbnail - open URL."""
+        if self.selected_url:
+            QDesktopServices.openUrl(QUrl(self.selected_url))
+
+    def _open_selected_url(self):
+        """Open the selected URL in browser."""
+        if self.selected_url:
+            QDesktopServices.openUrl(QUrl(self.selected_url))
+
+    def _refresh_thumbnail(self):
+        """Refresh the thumbnail for the selected URL."""
+        if self.selected_url:
+            self.thumbnail_label.setText("Refreshing preview...")
+            self.preview_status_label.setText("Regenerating...")
+            self.thumbnail_service.get_thumbnail(self.selected_url, force_refresh=True)
 
     def create_menu_bar(self):
         """Create the menu bar."""
@@ -476,6 +677,16 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(url_item.text())))
         menu.addAction(open_action)
 
+        menu.addSeparator()
+
+        # Generate/refresh thumbnail
+        url = url_item.text()
+        thumb_action = QAction("Generate Thumbnail", self)
+        thumb_action.triggered.connect(lambda: self._generate_thumbnail_for_url(url))
+        menu.addAction(thumb_action)
+
+        menu.addSeparator()
+
         # Copy URL
         copy_url_action = QAction("Copy URL", self)
         copy_url_action.triggered.connect(lambda: QApplication.clipboard().setText(url_item.text()))
@@ -488,6 +699,13 @@ class MainWindow(QMainWindow):
             menu.addAction(copy_title_action)
 
         menu.exec(self.bookmark_table.mapToGlobal(position))
+
+    def _generate_thumbnail_for_url(self, url: str):
+        """Generate thumbnail for a specific URL."""
+        self.thumbnail_service.get_thumbnail(url, force_refresh=True)
+        if url == self.selected_url:
+            self.thumbnail_label.setText("Generating preview...")
+            self.preview_status_label.setText("Generating...")
 
     def show_all_bookmarks(self):
         """Show all bookmarks."""

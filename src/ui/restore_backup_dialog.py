@@ -263,20 +263,48 @@ class RestoreBackupDialog(QDialog):
                     running_pids = []
                     for proc in psutil.process_iter(['pid', 'name']):
                         try:
-                            if proc.info['name'] and 'msedge' in proc.info['name'].lower():
+                            if proc.info['name'] and browser_name.lower() in proc.info['name'].lower():
                                 running_pids.append(f"{proc.info['name']} (PID {proc.info['pid']})")
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
+
+                    # Check if only WebView2 processes (safe to ignore)
+                    only_webview = all('webview' in p.lower() for p in running_pids) if running_pids else False
 
                     detail_msg = message
                     if running_pids:
                         detail_msg += "\n\nProcesses still running:\n" + "\n".join(running_pids[:5])
                         if len(running_pids) > 5:
                             detail_msg += f"\n... and {len(running_pids) - 5} more"
-                        detail_msg += "\n\nTry closing Edge manually or use Task Manager."
 
-                    QMessageBox.warning(self, "Could Not Close Browser", detail_msg)
-                    return
+                    if only_webview:
+                        detail_msg += "\n\nNote: Only WebView2 processes are running, which are used by other apps and should not affect bookmark restore."
+                        detail_msg += "\n\nWould you like to continue anyway?"
+
+                        continue_reply = QMessageBox.question(
+                            self,
+                            "Continue Restore?",
+                            detail_msg,
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.Yes
+                        )
+                        if continue_reply != QMessageBox.StandardButton.Yes:
+                            return
+                        # Continue with restore
+                    else:
+                        detail_msg += "\n\nTry closing the browser manually or use Task Manager."
+                        detail_msg += "\n\nWould you like to try continuing anyway? (Not recommended)"
+
+                        continue_reply = QMessageBox.question(
+                            self,
+                            "Browser Still Running",
+                            detail_msg,
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No
+                        )
+                        if continue_reply != QMessageBox.StandardButton.Yes:
+                            return
+                        # Continue with restore
             else:
                 return
 
