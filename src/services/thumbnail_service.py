@@ -6,13 +6,57 @@ import os
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Callable
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QUrl
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import QApplication
+
+
+def check_playwright_available() -> bool:
+    """Check if Playwright is installed and configured."""
+    try:
+        from playwright.sync_api import sync_playwright
+        # Try to actually launch - this will fail if browsers aren't installed
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+def capture_screenshot_sync(url: str, cache_path: Path, width: int = 800, height: int = 600) -> Tuple[bool, str]:
+    """Capture screenshot synchronously (for use in thread pool).
+
+    Returns:
+        Tuple of (success, error_message_or_empty)
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": width, "height": height})
+
+            try:
+                page.goto(url, timeout=30000, wait_until="networkidle")
+                page.wait_for_timeout(1000)
+
+                # Take screenshot directly to file
+                page.screenshot(path=str(cache_path), type="png")
+                browser.close()
+                return True, ""
+            except Exception as e:
+                browser.close()
+                return False, str(e)
+    except ImportError:
+        return False, "Playwright not installed"
+    except Exception as e:
+        return False, str(e)
 
 
 class ThumbnailWorker(QThread):
@@ -104,12 +148,125 @@ class ThumbnailWorker(QThread):
         return pixmap
 
 
+class BatchThumbnailWorker(QThread):
+    """Worker thread for batch thumbnail generation with thread pool."""
+
+    # Signals
+    progress = pyqtSignal(int, int, str)  # current, total, current_url
+    thumbnail_generated = pyqtSignal(str, bool, str)  # url, success, error_message
+    finished_batch = pyqtSignal(int, int)  # success_count, error_count
+
+    def __init__(self, urls: List[str], cache_dir: Path, max_workers: int = 4,
+                 skip_cached: bool = True, metadata: dict = None):
+        super().__init__()
+        self.urls = urls
+        self.cache_dir = cache_dir
+        self.max_workers = max_workers
+        self.skip_cached = skip_cached
+        self.metadata = metadata or {}
+        self.cache_duration = timedelta(days=7)
+        self._cancelled = False
+
+    def cancel(self):
+        """Cancel the batch operation."""
+        self._cancelled = True
+
+    def _get_cache_path(self, url: str) -> Path:
+        """Get the cache file path for a URL."""
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        return self.cache_dir / f"{url_hash}.png"
+
+    def _is_cache_valid(self, url: str) -> bool:
+        """Check if cached thumbnail is still valid."""
+        cache_path = self._get_cache_path(url)
+        if not cache_path.exists():
+            return False
+
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        if url_hash in self.metadata:
+            try:
+                cached_time = datetime.fromisoformat(self.metadata[url_hash].get('timestamp', ''))
+                if datetime.now() - cached_time < self.cache_duration:
+                    return True
+            except (ValueError, KeyError):
+                pass
+        return False
+
+    def run(self):
+        """Run batch thumbnail generation."""
+        # Filter URLs if skipping cached
+        urls_to_process = []
+        for url in self.urls:
+            if self._cancelled:
+                break
+            if self.skip_cached and self._is_cache_valid(url):
+                self.thumbnail_generated.emit(url, True, "cached")
+            else:
+                urls_to_process.append(url)
+
+        if not urls_to_process or self._cancelled:
+            self.finished_batch.emit(len(self.urls) - len(urls_to_process), 0)
+            return
+
+        success_count = len(self.urls) - len(urls_to_process)  # Count cached as success
+        error_count = 0
+
+        # Process in batches using thread pool
+        # Note: Playwright has issues with concurrent instances, so we use max_workers=2
+        effective_workers = min(self.max_workers, 2)  # Limit for Playwright stability
+
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            # Submit all tasks
+            future_to_url = {}
+            for url in urls_to_process:
+                if self._cancelled:
+                    break
+                cache_path = self._get_cache_path(url)
+                future = executor.submit(capture_screenshot_sync, url, cache_path)
+                future_to_url[future] = url
+
+            # Process completed tasks
+            completed = 0
+            total = len(urls_to_process)
+
+            for future in as_completed(future_to_url):
+                if self._cancelled:
+                    # Cancel remaining futures
+                    for f in future_to_url:
+                        f.cancel()
+                    break
+
+                url = future_to_url[future]
+                completed += 1
+
+                try:
+                    success, error = future.result()
+                    if success:
+                        success_count += 1
+                        self.thumbnail_generated.emit(url, True, "")
+                    else:
+                        error_count += 1
+                        self.thumbnail_generated.emit(url, False, error)
+                except Exception as e:
+                    error_count += 1
+                    self.thumbnail_generated.emit(url, False, str(e))
+
+                self.progress.emit(completed, total, url)
+
+        self.finished_batch.emit(success_count, error_count)
+
+
 class ThumbnailService(QObject):
     """Service to manage thumbnail generation and caching."""
 
     thumbnail_ready = pyqtSignal(str, QPixmap)  # url, pixmap
     thumbnail_error = pyqtSignal(str, str)  # url, error_message
     thumbnail_loading = pyqtSignal(str)  # url
+
+    # Batch signals
+    batch_progress = pyqtSignal(int, int, str)  # current, total, url
+    batch_thumbnail_generated = pyqtSignal(str, bool, str)  # url, success, error
+    batch_finished = pyqtSignal(int, int)  # success_count, error_count
 
     def __init__(self):
         super().__init__()
@@ -123,6 +280,9 @@ class ThumbnailService(QObject):
 
         # Currently running workers
         self.workers = {}
+
+        # Batch worker
+        self.batch_worker: Optional[BatchThumbnailWorker] = None
 
         # Cache duration (7 days)
         self.cache_duration = timedelta(days=7)
@@ -159,11 +319,18 @@ class ThumbnailService(QObject):
         # Check metadata for timestamp
         url_hash = hashlib.md5(url.encode()).hexdigest()
         if url_hash in self.metadata:
-            cached_time = datetime.fromisoformat(self.metadata[url_hash].get('timestamp', ''))
-            if datetime.now() - cached_time < self.cache_duration:
-                return True
+            try:
+                cached_time = datetime.fromisoformat(self.metadata[url_hash].get('timestamp', ''))
+                if datetime.now() - cached_time < self.cache_duration:
+                    return True
+            except (ValueError, KeyError):
+                pass
 
         return False
+
+    def has_cached_thumbnail(self, url: str) -> bool:
+        """Check if a valid cached thumbnail exists for the URL."""
+        return self._is_cache_valid(url)
 
     def get_thumbnail(self, url: str, force_refresh: bool = False) -> Optional[QPixmap]:
         """Get a thumbnail for the URL.
@@ -193,6 +360,19 @@ class ThumbnailService(QObject):
         # Start async generation
         self.thumbnail_loading.emit(url)
         self._start_worker(url, cache_path)
+        return None
+
+    def get_cached_thumbnail(self, url: str) -> Optional[QPixmap]:
+        """Get a cached thumbnail without triggering generation.
+
+        Returns:
+            QPixmap if cached, None if not cached
+        """
+        if self._is_cache_valid(url):
+            cache_path = self._get_cache_path(url)
+            pixmap = QPixmap(str(cache_path))
+            if not pixmap.isNull():
+                return pixmap
         return None
 
     def _start_worker(self, url: str, cache_path: Path):
@@ -227,6 +407,66 @@ class ThumbnailService(QObject):
         if url in self.workers:
             worker = self.workers.pop(url)
             worker.deleteLater()
+
+    def generate_batch(self, urls: List[str], max_workers: int = 2,
+                       skip_cached: bool = True) -> bool:
+        """Start batch thumbnail generation.
+
+        Args:
+            urls: List of URLs to generate thumbnails for
+            max_workers: Number of concurrent workers (limited to 2 for Playwright stability)
+            skip_cached: If True, skip URLs that already have valid cached thumbnails
+
+        Returns:
+            True if batch started, False if another batch is running
+        """
+        if self.batch_worker and self.batch_worker.isRunning():
+            return False
+
+        self.batch_worker = BatchThumbnailWorker(
+            urls=urls,
+            cache_dir=self.cache_dir,
+            max_workers=max_workers,
+            skip_cached=skip_cached,
+            metadata=self.metadata
+        )
+
+        # Connect signals
+        self.batch_worker.progress.connect(self._on_batch_progress)
+        self.batch_worker.thumbnail_generated.connect(self._on_batch_thumbnail)
+        self.batch_worker.finished_batch.connect(self._on_batch_finished)
+
+        self.batch_worker.start()
+        return True
+
+    def cancel_batch(self):
+        """Cancel the running batch operation."""
+        if self.batch_worker and self.batch_worker.isRunning():
+            self.batch_worker.cancel()
+
+    def is_batch_running(self) -> bool:
+        """Check if a batch operation is running."""
+        return self.batch_worker is not None and self.batch_worker.isRunning()
+
+    def _on_batch_progress(self, current: int, total: int, url: str):
+        """Handle batch progress update."""
+        self.batch_progress.emit(current, total, url)
+
+    def _on_batch_thumbnail(self, url: str, success: bool, error: str):
+        """Handle individual thumbnail in batch."""
+        if success and error != "cached":
+            # Update metadata for newly generated thumbnails
+            url_hash = hashlib.md5(url.encode()).hexdigest()
+            self.metadata[url_hash] = {
+                'url': url,
+                'timestamp': datetime.now().isoformat()
+            }
+        self.batch_thumbnail_generated.emit(url, success, error)
+
+    def _on_batch_finished(self, success_count: int, error_count: int):
+        """Handle batch completion."""
+        self._save_metadata()
+        self.batch_finished.emit(success_count, error_count)
 
     def clear_cache(self):
         """Clear all cached thumbnails."""

@@ -17,6 +17,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from ..models.database import Database, get_database
 from ..models.bookmark import Bookmark
 from .duplicate_dialog import normalize_url
+from ..services.thumbnail_service import get_thumbnail_service, check_playwright_available
 
 
 @dataclass
@@ -287,6 +288,30 @@ class DeadLinkDialog(QDialog):
         options_layout.addStretch()
         layout.addWidget(options_group)
 
+        # Thumbnail option
+        thumb_group = QGroupBox("Thumbnails")
+        thumb_layout = QHBoxLayout(thumb_group)
+
+        self.generate_thumbs_check = QCheckBox("Generate thumbnails for live links")
+        self.generate_thumbs_check.setToolTip(
+            "After checking, generate page thumbnails for all links that are NOT dead.\n"
+            "Requires Playwright to be installed."
+        )
+        thumb_layout.addWidget(self.generate_thumbs_check)
+
+        self.thumb_status_label = QLabel()
+        if check_playwright_available():
+            self.thumb_status_label.setText("✅ Playwright available")
+            self.thumb_status_label.setStyleSheet("color: green;")
+        else:
+            self.thumb_status_label.setText("⚠️ Playwright not installed")
+            self.thumb_status_label.setStyleSheet("color: #cc7700;")
+            self.generate_thumbs_check.setEnabled(False)
+        thumb_layout.addWidget(self.thumb_status_label)
+
+        thumb_layout.addStretch()
+        layout.addWidget(thumb_group)
+
         # Progress group
         progress_group = QGroupBox("Progress")
         progress_layout = QVBoxLayout(progress_group)
@@ -466,6 +491,42 @@ class DeadLinkDialog(QDialog):
                 f"Skipped {duplicates_saved} duplicate URL checks.\n\n"
                 f"Results saved to database (Run ID: {check_run_id})."
             )
+
+        # Check if we should generate thumbnails for live links
+        if self.generate_thumbs_check.isChecked():
+            self._start_thumbnail_generation(dead_links)
+
+    def _start_thumbnail_generation(self, dead_links: list):
+        """Start thumbnail generation for live links."""
+        # Get dead link bookmark IDs
+        dead_bookmark_ids = {result.bookmark_id for result in dead_links}
+
+        # Get all bookmarks and filter to live links only
+        bookmarks = Bookmark.get_all(self.db)
+        live_urls = [
+            b.url for b in bookmarks
+            if b.bookmark_id not in dead_bookmark_ids
+            and b.url.startswith(('http://', 'https://'))
+        ]
+
+        if not live_urls:
+            return
+
+        # Ask user to confirm
+        reply = QMessageBox.question(
+            self,
+            "Generate Thumbnails",
+            f"Dead link check complete.\n\n"
+            f"Would you like to generate thumbnails for {len(live_urls)} live URLs?\n\n"
+            f"This may take some time.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            from .thumbnail_dialog import ThumbnailDialog
+            dialog = ThumbnailDialog(live_urls, self)
+            dialog.exec()
 
     def on_error(self, error_message: str):
         """Handle errors during check."""

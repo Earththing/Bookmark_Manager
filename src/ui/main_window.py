@@ -35,6 +35,7 @@ from .dead_link_dialog import DeadLinkDialog
 from .duplicate_dialog import DuplicateDialog, normalize_url
 from .refresh_all_dialog import RefreshAllDialog
 from .delete_bookmarks_dialog import DeleteBookmarksDialog
+from .thumbnail_dialog import ThumbnailDialog
 from ..services.thumbnail_service import get_thumbnail_service
 
 
@@ -360,6 +361,11 @@ class MainWindow(QMainWindow):
         dead_link_action.setShortcut("Ctrl+D")
         dead_link_action.triggered.connect(self.show_dead_link_dialog)
         file_menu.addAction(dead_link_action)
+
+        thumbnail_action = QAction("Generate &Thumbnails...", self)
+        thumbnail_action.setShortcut("Ctrl+T")
+        thumbnail_action.triggered.connect(self.show_thumbnail_dialog)
+        file_menu.addAction(thumbnail_action)
 
         file_menu.addSeparator()
 
@@ -773,6 +779,21 @@ class MainWindow(QMainWindow):
         # Refresh everything after (bookmarks may have been deleted)
         self.load_status_data()
         self.load_data()
+
+    def show_thumbnail_dialog(self):
+        """Show the thumbnail generation dialog."""
+        # Get selected URLs if any rows are selected
+        selected_urls = None
+        selected_rows = self.bookmark_table.selectionModel().selectedRows()
+        if selected_rows:
+            selected_urls = []
+            for row_idx in selected_rows:
+                url_item = self.bookmark_table.item(row_idx.row(), 1)
+                if url_item:
+                    selected_urls.append(url_item.text())
+
+        dialog = ThumbnailDialog(selected_urls, self)
+        dialog.exec()
 
     def on_database_reset(self):
         """Handle database reset - get new connection."""

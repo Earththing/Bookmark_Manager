@@ -14,6 +14,8 @@ A **desktop GUI application** (built with PyQt6) to organize and manage bookmark
 - **Folder Navigation**: Browse bookmarks by their original folder structure
 - **Dead Link Detection**: Check for broken links with parallel URL checking
 - **Duplicate Detection**: Find exact and similar duplicate bookmarks
+- **Page Thumbnails**: Generate preview thumbnails for bookmarks (requires Playwright)
+- **Delete from Browsers**: Remove dead links and duplicates from browser bookmark files
 - **Database Backup**: Create timestamped backups before operations
 - **Refresh All**: One-click backup, import, duplicate check, and dead link check
 
@@ -27,6 +29,8 @@ A **desktop GUI application** (built with PyQt6) to organize and manage bookmark
 
 - Python 3.10+
 - PyQt6
+- psutil (for browser process detection)
+- Playwright (optional, for page thumbnails)
 
 ### Setup
 
@@ -39,9 +43,25 @@ cd Bookmark_Manager
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install PyQt6
+# Install required dependencies
+pip install PyQt6 psutil
+
+# Install optional dependencies for page thumbnails
+pip install playwright
+playwright install chromium
 ```
+
+### Playwright Setup (for Thumbnails)
+
+To enable page thumbnail generation, install Playwright:
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+This downloads a headless Chromium browser (~150MB) used to capture page screenshots.
+Without Playwright, thumbnail features will show placeholder images.
 
 ## Usage
 
@@ -77,6 +97,8 @@ python -m src.main
 - **File > Import from Browsers...** (Ctrl+I) - Import bookmarks only
 - **File > Check Dead Links...** (Ctrl+D) - Check for broken links
 - **File > Find Duplicates...** (Ctrl+U) - Find duplicate bookmarks
+- **File > Generate Thumbnails...** (Ctrl+T) - Generate page preview thumbnails
+- **File > Delete from Browsers...** (Ctrl+Shift+D) - Remove bookmarks from browser files
 - **F5** - Refresh the view
 
 ### Browsing Bookmarks
@@ -98,11 +120,13 @@ python -m src.main
 | Exact Dup | Number of exact duplicates |
 | Similar | Number of similar URLs |
 
-## Database
+## Data Storage
 
-The application stores data in a SQLite database at:
-- **Windows**: `C:\Users\<username>\.bookmark_manager\bookmarks.db`
-- **macOS/Linux**: `~/.bookmark_manager/bookmarks.db`
+The application stores data in the following locations:
+
+- **Database**: `~/.bookmark_manager/bookmarks.db` - SQLite database with bookmarks
+- **Thumbnails**: `~/.bookmark_manager/thumbnails/` - Cached page screenshots
+- **Backups**: `~/.bookmark_manager/browser_backups/` - Browser bookmark file backups
 
 ### Database Views
 
